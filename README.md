@@ -1,5 +1,9 @@
 # Bticino C300X — Home Assistant Integration
 
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+
+[![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Mirmanero&repository=ha-bticino_c300x&category=integration)
+
 Custom integration for the **Bticino Classe 300X** video door entry system (videocitofono).
 
 After an initial one-time cloud setup, the integration operates **entirely on the local network** via the OWN (Open Web Net) protocol — no cloud dependency at runtime.
