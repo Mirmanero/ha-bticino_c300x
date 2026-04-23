@@ -1,0 +1,13 @@
+{
+  "domain": "bticino_c300x",
+  "name": "Bticino C300X Videocitofono",
+  "version": "0.3.0",
+  "integration_type": "hub",
+  "config_flow": true,
+  "documentation": "https://github.com/Mirmanero/ha-bticino_c300x",
+  "issue_tracker": "https://github.com/Mirmanero/ha-bticino_c300x/issues",
+  "requirements": [],
+  "dependencies": [],
+  "codeowners": ["@Mirmanero"],
+  "iot_class": "local_push"
+}

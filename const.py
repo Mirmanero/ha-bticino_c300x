@@ -11,10 +11,6 @@ CONF_OWN_PASSWORD = "own_password"
 CONF_LOCAL_IP = "local_ip"
 CONF_DEVICES = "devices"
 
-# Runtime data keys (stored in hass.data[DOMAIN][entry_id])
+# Runtime data keys
 DATA_OWN_PARAMS = "own_params"
 DATA_DEVICES = "devices"
-
-# CID grouping (mirrors pybticino.const)
-CID_STANDARD = {10060, 3008}
-CID_ALT = {2009}

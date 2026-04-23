@@ -6,7 +6,6 @@ Step 2 – gateway: confirm/override the discovered local IP
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 from typing import Any
 
@@ -17,6 +16,8 @@ from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 
+from .bticino_lib import BticinoApiClient
+from .bticino_lib.exceptions import BticinoAuthError, BticinoConnectionError
 from .const import (
     CONF_DEVICES,
     CONF_GATEWAY_ID,
@@ -32,10 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 async def _cloud_setup(username: str, password: str) -> dict:
-    """Login to cloud, fetch plant/gateway/devices/IP. Returns entry data dict."""
-    from .pybticino import BticinoApiClient
-    from .pybticino.exceptions import BticinoAuthError, BticinoConnectionError
-
+    """Login and auto-discover everything. Returns the full config entry data dict."""
     async with aiohttp.ClientSession() as session:
         api = BticinoApiClient(session)
 
@@ -57,22 +55,20 @@ async def _cloud_setup(username: str, password: str) -> dict:
 
         gateway = gateways[0]
 
-        # Fetch OWN password (returned directly in gateway list response)
         own_password = "12345"
         try:
-            gw_info = await api.get_gateway_info(plant.plant_id, gateway.gateway_id, "")
+            gw_info = await api.get_gateway_info(plant.plant_id, gateway.gateway_id)
             own_password = gw_info.get("PswOpen") or "12345"
         except Exception:
             _LOGGER.warning("Could not fetch PswOpen, using default")
 
-        # Fetch device list + WiFi IP from conf ZIP
         devices: list[dict] = []
         local_ip = ""
         try:
             device_objs, local_ip = await api.get_plant_setup(
                 plant.plant_id, gateway.gateway_id
             )
-            devices = [dataclasses.asdict(d) for d in device_objs]
+            devices = [d.to_dict() for d in device_objs]
         except Exception as exc:
             _LOGGER.warning("Could not fetch plant setup: %s", exc)
 
@@ -98,7 +94,7 @@ class BticinoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1: ask for credentials and auto-discover everything from cloud."""
+        """Step 1: credentials → auto-discover from cloud."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -138,29 +134,25 @@ class BticinoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 2: confirm/override the discovered local IP."""
         if user_input is not None:
             self._config[CONF_LOCAL_IP] = user_input[CONF_LOCAL_IP].strip()
-            gw_id = self._config[CONF_GATEWAY_ID]
-            devices = self._config.get(CONF_DEVICES, [])
-            device_names = ", ".join(d.get("name", "") for d in devices) or "—"
             return self.async_create_entry(
-                title=f"C300X – {gw_id}",
+                title=f"C300X – {self._config[CONF_GATEWAY_ID]}",
                 data=self._config,
-                description_placeholders={"devices": device_names},
             )
 
         discovered_ip = self._config.get(CONF_LOCAL_IP, "")
+        device_names = ", ".join(
+            d.get("name", "") for d in self._config.get(CONF_DEVICES, [])
+        ) or "—"
+
         return self.async_show_form(
             step_id="gateway",
             data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_LOCAL_IP, default=discovered_ip): str,
-                }
+                {vol.Required(CONF_LOCAL_IP, default=discovered_ip): str}
             ),
             description_placeholders={
                 "gateway_id": self._config.get(CONF_GATEWAY_ID, ""),
                 "own_password": self._config.get(CONF_OWN_PASSWORD, ""),
-                "devices": ", ".join(
-                    d.get("name", "") for d in self._config.get(CONF_DEVICES, [])
-                ) or "—",
+                "devices": device_names,
             },
         )
 

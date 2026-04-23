@@ -1,0 +1,31 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Bticino C300X — Sign in",
+        "description": "Enter your **myhomeweb.com** credentials. The system will auto-configure itself.",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      },
+      "gateway": {
+        "title": "Bticino C300X — Local setup",
+        "description": "Gateway detected: **{gateway_id}**\nOWN password: `{own_password}`\nDevices found: {devices}\n\nConfirm or edit the gateway's local IP address.",
+        "data": {
+          "local_ip": "Gateway local IP address"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the cloud portal",
+      "invalid_auth": "Invalid credentials",
+      "no_plants": "No plant found for this account",
+      "no_gateways": "No gateway found for the plant",
+      "unknown": "Unexpected error — check the logs"
+    },
+    "abort": {
+      "already_configured": "This gateway is already configured"
+    }
+  }
+}
