@@ -7,8 +7,14 @@ The gateway uses BTicino Open Web Net text protocol:
   ACK:           *#*1##
   NACK:          *#*0##
 
-Authentication (if required) uses SHA-256 challenge-response,
-reverse-engineered from f0.C0816a in the decompiled app.
+Handshake (from decompiled h0/k.java):
+  1. Gateway sends *#*1##
+  2. Client sends *99*0## (CMD session)
+  3a. Gateway sends *#*1## → connected, no auth
+  3b. Gateway sends a challenge number → client sends *#<hash(challenge,pwd)>## → gateway ACKs
+
+The challenge hash is implemented in f0/b.java (BTOpenPassword):
+a sequence of 32-bit rotate/byteswap/NOT operations, one per digit in the challenge.
 """
 
 from __future__ import annotations
@@ -25,6 +31,67 @@ from ..exceptions import BticinoOwnError
 _LOGGER = logging.getLogger(__name__)
 
 _OWN_MAGIC = "736F70653E636F70653E"   # "sope>cope>" — from C0816a
+
+
+def _open_pwd_hash(challenge: str, password: str) -> str:
+    """Implement f0.b.a() — BTOpenPassword challenge-response hash.
+
+    Each digit in the challenge applies a 32-bit operation on the accumulator
+    (rotate, byte-swap, NOT). Derived from f0/b.java in the decompiled app.
+    """
+    try:
+        acc = int(password)
+    except ValueError:
+        acc = 0
+
+    first = True
+
+    for c in challenge:
+        acc &= 0xFFFFFFFF
+
+        if c == '1':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = (acc & 0xFFFFFF80) >> 7
+            acc = (j8 + ((acc << 25) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        elif c == '2':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = (acc & 0xFFFFFFF0) >> 4
+            acc = (j8 + ((acc << 28) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        elif c == '3':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = (acc & 0xFFFFFFF8) >> 3
+            acc = (j8 + ((acc << 29) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        elif c == '4':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = (acc << 1) & 0xFFFFFFFF
+            acc = (j8 + (acc >> 31)) & 0xFFFFFFFF
+        elif c == '5':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = (acc << 5) & 0xFFFFFFFF
+            acc = (j8 + (acc >> 27)) & 0xFFFFFFFF
+        elif c == '6':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = (acc << 12) & 0xFFFFFFFF
+            acc = (j8 + (acc >> 20)) & 0xFFFFFFFF
+        elif c == '7':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = (acc & 0xFF00) + ((acc & 0xFF) << 24) + ((acc & 0xFF0000) >> 16)
+            j10 = (acc & 0xFF000000) >> 8
+            acc = (j8 + j10) & 0xFFFFFFFF
+        elif c == '8':
+            if first: acc = int(password) & 0xFFFFFFFF
+            j8 = ((acc & 0xFFFF) << 16) + (acc >> 24)
+            j10 = (acc & 0xFF0000) >> 8
+            acc = (j8 + j10) & 0xFFFFFFFF
+        elif c == '9':
+            if first: acc = int(password) & 0xFFFFFFFF
+            acc = (~acc) & 0xFFFFFFFF
+        else:
+            continue  # non-digit: skip without clearing 'first'
+
+        first = False
+
+    return str(acc & 0xFFFFFFFF)
 
 
 def _sha256_hex(data: str) -> str:
@@ -169,13 +236,37 @@ class BticinoOwnClient:
         await self._negotiate_command_session()
 
     async def _negotiate_command_session(self) -> None:
-        """Send *99*0## to open a command session and wait for ACK."""
+        """Send *99*0## to open a CMD session, handle optional password challenge.
+
+        From k.java (BTOpenLink):
+          - ACK (*#*1##)  → ready, no auth needed
+          - challenge      → compute *#<f0.b.a(challenge, password)>## and wait for ACK
+          - NACK           → refused
+        """
         resp = await self._send_raw_frame("*99*0##")
-        _LOGGER.debug("OWN command session response: %s", resp)
+        _LOGGER.debug("OWN CMD session response: %s", resp)
+
+        if resp == OWN_ACK:
+            return
         if resp == OWN_NACK:
             raise BticinoOwnError("Gateway refused command session (*99*0##)")
-        if resp != OWN_ACK:
-            _LOGGER.debug("OWN: unexpected session response %s — proceeding anyway", resp)
+
+        # Challenge: strip frame chars and compute hash
+        challenge = resp.strip().replace("#", "").replace("*", "").replace("|", "")
+        _LOGGER.debug("OWN CMD session challenge: %s", challenge)
+
+        if not challenge:
+            _LOGGER.debug("OWN: empty challenge, proceeding without auth")
+            return
+
+        hashed = _open_pwd_hash(challenge, self._password)
+        ack = await self._send_raw_frame(f"*#{hashed}##")
+        _LOGGER.debug("OWN CMD session auth response: %s", ack)
+
+        if ack == OWN_NACK:
+            raise BticinoOwnError("Gateway rejected CMD session password (wrong PswOpen?)")
+        if ack != OWN_ACK:
+            _LOGGER.debug("OWN: unexpected auth response %s — proceeding anyway", ack)
 
     async def _authenticate(self, challenge: str) -> None:
         digits_match = (
