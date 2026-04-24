@@ -141,16 +141,41 @@ class BticinoOwnClient:
         return response
 
     async def _handshake(self) -> None:
+        """OWN connection handshake.
+
+        Standard BTicino flow:
+          1. Gateway sends *#*1## (hello)
+          2. Client sends *99*0## (request command session)
+          3. Gateway sends *#*1## (session ready)
+        If the gateway challenges with *98*/*99*, do password auth first.
+        """
         welcome = await self._read_frame()
         _LOGGER.debug("OWN welcome: %s", welcome)
-        if welcome == OWN_ACK:
-            return
+
         if welcome == OWN_NACK:
             raise BticinoOwnError("Gateway refused connection (*#*0##)")
+
         if "*98*" in welcome or "*99*" in welcome:
             await self._authenticate(welcome)
+            # after auth, negotiate command session
+            await self._negotiate_command_session()
             return
-        _LOGGER.debug("OWN: unexpected welcome %s — assuming no auth", welcome)
+
+        if welcome == OWN_ACK:
+            await self._negotiate_command_session()
+            return
+
+        _LOGGER.debug("OWN: unexpected welcome %s — trying command session anyway", welcome)
+        await self._negotiate_command_session()
+
+    async def _negotiate_command_session(self) -> None:
+        """Send *99*0## to open a command session and wait for ACK."""
+        resp = await self._send_raw_frame("*99*0##")
+        _LOGGER.debug("OWN command session response: %s", resp)
+        if resp == OWN_NACK:
+            raise BticinoOwnError("Gateway refused command session (*99*0##)")
+        if resp != OWN_ACK:
+            _LOGGER.debug("OWN: unexpected session response %s — proceeding anyway", resp)
 
     async def _authenticate(self, challenge: str) -> None:
         digits_match = (
