@@ -72,7 +72,11 @@ class BticinoButton(ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """Send open + close OWN frames to the gateway."""
+        """Send open + close OWN frames to the gateway.
+
+        The gateway closes the TCP connection after each command, so each
+        frame needs its own connection (full handshake + *99*0## each time).
+        """
         local_ip = self._own_params["local_ip"]
         password = self._own_params["own_password"]
 
@@ -84,8 +88,12 @@ class BticinoButton(ButtonEntity):
         try:
             async with BticinoOwnClient(local_ip, password) as client:
                 await client.send_raw(self._frame_open)
-                await asyncio.sleep(0.3)
+
+            await asyncio.sleep(0.3)
+
+            async with BticinoOwnClient(local_ip, password) as client:
                 await client.send_raw(self._frame_close)
+
         except BticinoOwnError as exc:
             _LOGGER.error("OWN command failed for '%s': %s", self._attr_name, exc)
             raise
