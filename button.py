@@ -80,20 +80,29 @@ class BticinoButton(ButtonEntity):
         local_ip = self._own_params["local_ip"]
         password = self._own_params["own_password"]
 
-        _LOGGER.debug(
-            "Button '%s' pressed — sending %s then %s to %s",
-            self._attr_name, self._frame_open, self._frame_close, local_ip,
+        _LOGGER.info(
+            "Button '%s' pressed — connecting to %s, will send %s then %s",
+            self._attr_name, local_ip, self._frame_open, self._frame_close,
         )
 
         try:
+            _LOGGER.info("Button '%s' — connection 1/2: sending %s", self._attr_name, self._frame_open)
             async with BticinoOwnClient(local_ip, password) as client:
-                await client.send_raw(self._frame_open)
+                resp1 = await client.send_raw(self._frame_open)
+            _LOGGER.info("Button '%s' — connection 1/2 OK, gateway replied: %s", self._attr_name, resp1)
 
             await asyncio.sleep(0.3)
 
+            _LOGGER.info("Button '%s' — connection 2/2: sending %s", self._attr_name, self._frame_close)
             async with BticinoOwnClient(local_ip, password) as client:
-                await client.send_raw(self._frame_close)
+                resp2 = await client.send_raw(self._frame_close)
+            _LOGGER.info("Button '%s' — connection 2/2 OK, gateway replied: %s", self._attr_name, resp2)
+
+            _LOGGER.info("Button '%s' — sequence completed successfully", self._attr_name)
 
         except BticinoOwnError as exc:
-            _LOGGER.error("OWN command failed for '%s': %s", self._attr_name, exc)
+            _LOGGER.error(
+                "Button '%s' — OWN error at %s: %s",
+                self._attr_name, local_ip, exc,
+            )
             raise

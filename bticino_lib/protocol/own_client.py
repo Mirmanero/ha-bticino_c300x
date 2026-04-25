@@ -202,7 +202,7 @@ class BticinoOwnClient:
     async def send_raw(self, frame: str) -> str:
         """Send an OWN frame and return the gateway response."""
         response = await self._send_raw_frame(frame)
-        _LOGGER.debug("OWN cmd %s -> %s", frame, response)
+        _LOGGER.info("OWN cmd %s -> %s", frame, response)
         if response == OWN_NACK:
             raise BticinoOwnError(f"Gateway NACK for command: {frame}")
         return response
@@ -217,14 +217,13 @@ class BticinoOwnClient:
         If the gateway challenges with *98*/*99*, do password auth first.
         """
         welcome = await self._read_frame()
-        _LOGGER.debug("OWN welcome: %s", welcome)
+        _LOGGER.info("OWN [%s] welcome: %s", self._host, welcome)
 
         if welcome == OWN_NACK:
             raise BticinoOwnError("Gateway refused connection (*#*0##)")
 
         if "*98*" in welcome or "*99*" in welcome:
             await self._authenticate(welcome)
-            # after auth, negotiate command session
             await self._negotiate_command_session()
             return
 
@@ -232,7 +231,7 @@ class BticinoOwnClient:
             await self._negotiate_command_session()
             return
 
-        _LOGGER.debug("OWN: unexpected welcome %s — trying command session anyway", welcome)
+        _LOGGER.warning("OWN [%s] unexpected welcome %r — trying *99*0## anyway", self._host, welcome)
         await self._negotiate_command_session()
 
     async def _negotiate_command_session(self) -> None:
@@ -244,7 +243,7 @@ class BticinoOwnClient:
           - NACK           → refused
         """
         resp = await self._send_raw_frame("*99*0##")
-        _LOGGER.debug("OWN CMD session response: %s", resp)
+        _LOGGER.info("OWN [%s] CMD session (*99*0##) -> %s", self._host, resp)
 
         if resp == OWN_ACK:
             return
@@ -253,20 +252,20 @@ class BticinoOwnClient:
 
         # Challenge: strip frame chars and compute hash
         challenge = resp.strip().replace("#", "").replace("*", "").replace("|", "")
-        _LOGGER.debug("OWN CMD session challenge: %s", challenge)
+        _LOGGER.info("OWN [%s] password challenge: %r -> computing hash", self._host, challenge)
 
         if not challenge:
-            _LOGGER.debug("OWN: empty challenge, proceeding without auth")
+            _LOGGER.warning("OWN [%s] empty challenge after *99*0##, proceeding without auth", self._host)
             return
 
         hashed = _open_pwd_hash(challenge, self._password)
         ack = await self._send_raw_frame(f"*#{hashed}##")
-        _LOGGER.debug("OWN CMD session auth response: %s", ack)
+        _LOGGER.info("OWN [%s] auth response: %s", self._host, ack)
 
         if ack == OWN_NACK:
             raise BticinoOwnError("Gateway rejected CMD session password (wrong PswOpen?)")
         if ack != OWN_ACK:
-            _LOGGER.debug("OWN: unexpected auth response %s — proceeding anyway", ack)
+            _LOGGER.warning("OWN [%s] unexpected auth response %r — proceeding anyway", self._host, ack)
 
     async def _authenticate(self, challenge: str) -> None:
         digits_match = (
