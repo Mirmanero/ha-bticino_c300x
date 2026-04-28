@@ -1,7 +1,7 @@
 {
   "domain": "bticino_c300x",
   "name": "Bticino C300X Videocitofono",
-  "version": "0.4.0",
+  "version": "1.5.0",
   "integration_type": "hub",
   "config_flow": true,
   "documentation": "https://github.com/Mirmanero/ha-bticino_c300x",
