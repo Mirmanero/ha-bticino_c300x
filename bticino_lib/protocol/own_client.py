@@ -250,8 +250,10 @@ class BticinoOwnClient:
         if resp == OWN_NACK:
             raise BticinoOwnError("Gateway refused command session (*99*0##)")
 
-        # Challenge: strip frame chars and compute hash
-        challenge = resp.strip().replace("#", "").replace("*", "").replace("|", "")
+        # Challenge frame is *98*<N>## — extract only the last numeric field.
+        # Stripping all delimiters would turn *98*2## into "982" (wrong).
+        challenge_match = re.search(r'\*(\d+)##', resp)
+        challenge = challenge_match.group(1) if challenge_match else resp.strip().replace("#", "").replace("*", "").replace("|", "")
         _LOGGER.info("OWN [%s] password challenge: %r -> computing hash", self._host, challenge)
 
         if not challenge:
