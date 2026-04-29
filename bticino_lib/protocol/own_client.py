@@ -250,8 +250,14 @@ class BticinoOwnClient:
         if resp == OWN_NACK:
             raise BticinoOwnError("Gateway refused command session (*99*0##)")
 
-        # Challenge frame is *98*<N>## — extract only the last numeric field.
-        # Stripping all delimiters would turn *98*2## into "982" (wrong).
+        # *98*N## is a session-mode/version frame (WHO=98 is OWN session management).
+        # Sending a BTOpenPassword hash in response makes the gateway close the connection.
+        # Treat it as "session accepted, proceed".
+        if re.match(r'^\*98\*\d+##$', resp):
+            _LOGGER.info("OWN [%s] session mode frame %s — proceeding without auth", self._host, resp)
+            return
+
+        # Numeric challenge: compute BTOpenPassword hash and respond.
         challenge_match = re.search(r'\*(\d+)##', resp)
         challenge = challenge_match.group(1) if challenge_match else resp.strip().replace("#", "").replace("*", "").replace("|", "")
         _LOGGER.info("OWN [%s] password challenge: %r -> computing hash", self._host, challenge)
