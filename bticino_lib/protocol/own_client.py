@@ -7,14 +7,17 @@ The gateway uses BTicino Open Web Net text protocol:
   ACK:           *#*1##
   NACK:          *#*0##
 
-Handshake (from decompiled h0/k.java):
+Handshake (from x2/C1380a.java FwUpdateThread in decompiled app):
   1. Gateway sends *#*1##
   2. Client sends *99*0## (CMD session)
   3a. Gateway sends *#*1## → connected, no auth
-  3b. Gateway sends a challenge number → client sends *#<hash(challenge,pwd)>## → gateway ACKs
-
-The challenge hash is implemented in f0/b.java (BTOpenPassword):
-a sequence of 32-bit rotate/byteswap/NOT operations, one per digit in the challenge.
+  3b. Gateway sends *98*2## → SHA-256 HMAC auth required:
+       - Client sends *#*1## (ACK)
+       - Gateway sends *#<nibble-encoded-MAC>## (challenge)
+       - Client sends *#<nonce_nibbles>*<token_nibbles>## (response)
+       - Gateway sends *#<server_token_nibbles>## (server proof)
+       - Client verifies and sends *#*1## (final ACK)
+  3c. Gateway sends other numeric challenge → BTOpenPassword hash (f0/b.java)
 """
 
 from __future__ import annotations
@@ -118,6 +121,22 @@ def _hex_encode_mac(mac: str) -> str:
         except ValueError:
             result.append(chunk)
         i += 2
+    return "".join(result)
+
+
+def _nibble_decode(nibble_str: str) -> str:
+    """Inverse of _nybbles(): each 2-digit decimal pair → one hex char.
+
+    The gateway encodes the MAC as nibble pairs (Java d() in C0816a):
+    hex char '0'→"00", 'b'→"11", 'f'→"15".  This function reverses that.
+    """
+    result = []
+    for i in range(0, len(nibble_str) - 1, 2):
+        pair = nibble_str[i : i + 2]
+        try:
+            result.append(hex(int(pair))[2:])
+        except ValueError:
+            pass
     return "".join(result)
 
 
@@ -250,17 +269,21 @@ class BticinoOwnClient:
         if resp == OWN_NACK:
             raise BticinoOwnError("Gateway refused command session (*99*0##)")
 
-        # *98*N## is a session-mode/version frame (WHO=98 is OWN session management).
-        # Sending a BTOpenPassword hash in response makes the gateway close the connection.
-        # Treat it as "session accepted, proceed".
-        if re.match(r'^\*98\*\d+##$', resp):
-            _LOGGER.info("OWN [%s] session mode frame %s — proceeding without auth", self._host, resp)
+        # *98*2## = SHA-256 HMAC auth required (from x2.C1380a FwUpdateThread).
+        if resp == "*98*2##":
+            _LOGGER.info("OWN [%s] SHA-256 HMAC auth required", self._host)
+            await self._hmac_auth_v2()
             return
 
-        # Numeric challenge: compute BTOpenPassword hash and respond.
-        challenge_match = re.search(r'\*(\d+)##', resp)
-        challenge = challenge_match.group(1) if challenge_match else resp.strip().replace("#", "").replace("*", "").replace("|", "")
-        _LOGGER.info("OWN [%s] password challenge: %r -> computing hash", self._host, challenge)
+        # Other *98*N## frames: treat as session accepted (unknown mode).
+        if re.match(r'^\*98\*\d+##$', resp):
+            _LOGGER.info("OWN [%s] unknown session mode %s — proceeding", self._host, resp)
+            return
+
+        # Classic BTOpenPassword challenge: strip frame chars, compute hash.
+        # App code (h0/k.java): string.trim().replace("#","").replace("*","").replace("|","")
+        challenge = resp.strip().replace("#", "").replace("*", "").replace("|", "")
+        _LOGGER.info("OWN [%s] BTOpenPassword challenge: %r -> computing hash", self._host, challenge)
 
         if not challenge:
             _LOGGER.warning("OWN [%s] empty challenge after *99*0##, proceeding without auth", self._host)
@@ -298,6 +321,52 @@ class BticinoOwnClient:
             if token_match and auth.verify_server(token_match.group(1)):
                 return
         raise BticinoOwnError(f"OWN HMAC auth failed: {resp}")
+
+    async def _hmac_auth_v2(self) -> None:
+        """SHA-256 HMAC authentication for *98*2## (from x2.C1380a FwUpdateThread).
+
+        Flow:
+          client *#*1##  →  gateway *#<nibble-MAC>##
+          client *#<nonce>*<token>##  →  gateway *#<server-token>##
+          client *#*1##  (final ACK, no response expected)
+        """
+        # Send ACK, read MAC challenge
+        await self._write_frame(OWN_ACK)
+        challenge = await self._read_frame()
+        _LOGGER.info("OWN [%s] HMAC MAC challenge: %s", self._host, challenge)
+
+        # *#<nibble_data>## → strip *# prefix and ## suffix
+        nibble_data = challenge[2:].replace("#", "")
+        mac_hex = _nibble_decode(nibble_data)
+        _LOGGER.debug("OWN [%s] HMAC decoded mac_hex: %s", self._host, mac_hex)
+
+        # Compute tokens
+        pwd_hash   = _sha256_hex(self._password)
+        nonce_hash = _sha256_hex(str(uuid.uuid4()))
+        nonce_nibbles = _nybbles(nonce_hash)
+        token_nibbles = _nybbles(_sha256_hex(mac_hex + nonce_hash + _OWN_MAGIC + pwd_hash))
+        expected_server = _nybbles(_sha256_hex(mac_hex + nonce_hash + pwd_hash))
+
+        # Send nonce*token, read server proof
+        await self._write_frame(f"*#{nonce_nibbles}*{token_nibbles}##")
+        server_frame = await self._read_frame()
+        _LOGGER.info("OWN [%s] HMAC server token: %s", self._host, server_frame)
+
+        server_token = server_frame[2:].replace("#", "")
+        if server_token != expected_server:
+            _LOGGER.warning("OWN [%s] HMAC server token mismatch — proceeding anyway", self._host)
+
+        # Final ACK (gateway does not reply — just starts accepting commands)
+        await self._write_frame(OWN_ACK)
+        _LOGGER.info("OWN [%s] HMAC auth complete", self._host)
+
+    async def _write_frame(self, frame: str) -> None:
+        """Send an OWN frame without waiting for a response."""
+        if not self._writer:
+            raise BticinoOwnError("Not connected")
+        _LOGGER.debug("OWN >>> %s", frame)
+        self._writer.write(frame.encode())
+        await self._writer.drain()
 
     async def _send_raw_frame(self, frame: str) -> str:
         if not self._writer or not self._reader:
