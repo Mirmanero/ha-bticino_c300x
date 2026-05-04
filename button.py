@@ -43,15 +43,22 @@ class BticinoButton(ButtonEntity):
 
         cid = device["cid"]
         addr = device["addr"]
+        dev = device.get("dev", "2")
+        where = f"{dev}{addr}"
         self._attr_unique_id = f"{entry_id}_{cid}_{addr}"
         self._attr_name = device.get("name", f"Attivazione {cid}")
+        _LOGGER.debug("Button '%s' frames: open=%s close=%s (dev=%r addr=%r where=%r)",
+                      self._attr_name,
+                      f"{DTMF_OPEN_STD if cid in CID_STANDARD else DTMF_OPEN_ALT}*{where}##",
+                      f"{DTMF_CLOSE_STD if cid in CID_STANDARD else DTMF_CLOSE_ALT}*{where}##",
+                      dev, addr, where)
 
         if cid in CID_STANDARD:
-            self._frame_open = f"{DTMF_OPEN_STD}*{addr}##"
-            self._frame_close = f"{DTMF_CLOSE_STD}*{addr}##"
+            self._frame_open = f"{DTMF_OPEN_STD}*{where}##"
+            self._frame_close = f"{DTMF_CLOSE_STD}*{where}##"
         else:
-            self._frame_open = f"{DTMF_OPEN_ALT}*{addr}##"
-            self._frame_close = f"{DTMF_CLOSE_ALT}*{addr}##"
+            self._frame_open = f"{DTMF_OPEN_ALT}*{where}##"
+            self._frame_close = f"{DTMF_CLOSE_ALT}*{where}##"
 
     @property
     def icon(self) -> str:
