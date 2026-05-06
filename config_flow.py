@@ -6,6 +6,7 @@ Step 2 – gateway: confirm/override the discovered local IP
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -25,11 +26,19 @@ from .const import (
     CONF_OWN_PASSWORD,
     CONF_PASSWORD,
     CONF_PLANT_ID,
+    CONF_SIP_DOMAIN,
+    CONF_SIP_PASSWORD,
+    CONF_SIP_USERNAME,
     CONF_USERNAME,
     DOMAIN,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _ha_device_id(gateway_id: str) -> str:
+    """Generate a stable 12-char hex device ID for this HA instance."""
+    return hashlib.md5(f"ha-bticino-{gateway_id}".encode()).hexdigest()[:12].upper()
 
 
 async def _cloud_setup(username: str, password: str) -> dict:
@@ -72,6 +81,17 @@ async def _cloud_setup(username: str, password: str) -> dict:
         except Exception as exc:
             _LOGGER.warning("Could not fetch plant setup: %s", exc)
 
+        sip_username = sip_password = sip_domain = ""
+        try:
+            device_id = _ha_device_id(gateway.gateway_id)
+            sip = await api.get_sip_credentials(plant.plant_id, gateway.gateway_id, device_id)
+            sip_username = sip.username
+            sip_password = sip.password
+            sip_domain = sip.domain
+            _LOGGER.info("SIP credentials acquired for gateway %s", gateway.gateway_id)
+        except Exception as exc:
+            _LOGGER.warning("Could not fetch SIP credentials: %s", exc)
+
         return {
             CONF_USERNAME: username,
             CONF_PASSWORD: password,
@@ -80,6 +100,9 @@ async def _cloud_setup(username: str, password: str) -> dict:
             CONF_OWN_PASSWORD: own_password,
             CONF_LOCAL_IP: local_ip,
             CONF_DEVICES: devices,
+            CONF_SIP_USERNAME: sip_username,
+            CONF_SIP_PASSWORD: sip_password,
+            CONF_SIP_DOMAIN: sip_domain,
         }
 
 

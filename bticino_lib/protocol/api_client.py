@@ -23,6 +23,7 @@ from ..const import (
     API_GW_LIST,
     API_PLANTS,
     API_SIGN_IN,
+    API_SIP_USER,
     APP_VERSION,
     CONF_ZIP_PASSWORD,
     HEADER_AUTH_TOKEN,
@@ -32,7 +33,7 @@ from ..const import (
     PORTAL_BASE_URL,
 )
 from ..exceptions import BticinoApiError, BticinoAuthError, BticinoConnectionError
-from ..models import DeviceInfo, GatewayInfo, PlantInfo
+from ..models import DeviceInfo, GatewayInfo, PlantInfo, SipCredentials
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -251,7 +252,38 @@ class BticinoApiClient:
             raise BticinoConnectionError(f"Cannot connect to {self._base_url}") from exc
 
 
-# ------------------------------------------------------------------
+    async def get_sip_credentials(
+        self, plant_id: str, gateway_id: str, device_id: str
+    ) -> SipCredentials:
+        """Fetch SIP username + password for door activation.
+
+        device_id is sent as ?deviceId= query param. It can be a real device MAC
+        or a synthetic ID (the server will provision a new SIP account if needed).
+        """
+        path = API_SIP_USER.format(plant_id=plant_id, gw_id=gateway_id)
+        data = await self._request("GET", path, params={"deviceId": device_id})
+
+        item: dict = {}
+        if isinstance(data, list):
+            item = data[0] if data else {}
+        elif isinstance(data, dict):
+            item = data
+
+        try:
+            username = (
+                item.get("SipAccount") or item.get("sipAccount") or item["SipAccount"]
+            )
+            password = (
+                item.get("SipPassword") or item.get("sipPassword") or item["SipPassword"]
+            )
+            domain = item.get("domain") or f"{gateway_id}.bs.iotleg.com"
+        except KeyError as exc:
+            raise BticinoApiError(f"Unexpected SIP user response: {item}") from exc
+
+        _LOGGER.debug("SIP credentials acquired for gateway %s", gateway_id)
+        return SipCredentials(username=username, password=password, domain=domain)
+
+    # ------------------------------------------------------------------
 # ZIP parsing helpers
 # ------------------------------------------------------------------
 

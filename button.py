@@ -1,4 +1,4 @@
-"""Button entities for Bticino C300X — local OWN protocol only."""
+"""Button entities for Bticino C300X — door activation via SIP MESSAGE."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo as HaDeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .bticino_lib import BticinoOwnClient
-from .bticino_lib.exceptions import BticinoOwnError
-from .bticino_lib.const import CID_STANDARD, DTMF_CLOSE_ALT, DTMF_CLOSE_STD, DTMF_OPEN_ALT, DTMF_OPEN_STD
-from .const import DATA_DEVICES, DATA_OWN_PARAMS, DOMAIN
+from .bticino_lib import BticinoSipClient
+from .bticino_lib.exceptions import BticinoSipError
+from .bticino_lib.models import SipCredentials
+from .bticino_lib.const import CID_STANDARD, DTMF_CLOSE_ALT, DTMF_CLOSE_STD, DTMF_OPEN_ALT, DTMF_OPEN_STD, SIP_TLS_PORT
+from .const import DATA_DEVICES, DATA_OWN_PARAMS, DATA_SIP_PARAMS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,18 +28,25 @@ async def async_setup_entry(
     """Set up button entities from the stored device list."""
     data = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
-        BticinoButton(data[DATA_OWN_PARAMS], device, entry.entry_id)
+        BticinoButton(data[DATA_OWN_PARAMS], data[DATA_SIP_PARAMS], device, entry.entry_id)
         for device in data[DATA_DEVICES]
     )
 
 
 class BticinoButton(ButtonEntity):
-    """A button that sends an OWN activation command to the gateway."""
+    """A button that sends door-activation OWN frames via SIP MESSAGE."""
 
     _attr_has_entity_name = True
 
-    def __init__(self, own_params: dict, device: dict, entry_id: str) -> None:
+    def __init__(
+        self,
+        own_params: dict,
+        sip_params: dict,
+        device: dict,
+        entry_id: str,
+    ) -> None:
         self._own_params = own_params
+        self._sip_params = sip_params
         self._device = device
 
         cid = device["cid"]
@@ -47,11 +55,6 @@ class BticinoButton(ButtonEntity):
         where = f"{dev}{addr}"
         self._attr_unique_id = f"{entry_id}_{cid}_{addr}"
         self._attr_name = device.get("name", f"Attivazione {cid}")
-        _LOGGER.debug("Button '%s' frames: open=%s close=%s (dev=%r addr=%r where=%r)",
-                      self._attr_name,
-                      f"{DTMF_OPEN_STD if cid in CID_STANDARD else DTMF_OPEN_ALT}*{where}##",
-                      f"{DTMF_CLOSE_STD if cid in CID_STANDARD else DTMF_CLOSE_ALT}*{where}##",
-                      dev, addr, where)
 
         if cid in CID_STANDARD:
             self._frame_open = f"{DTMF_OPEN_STD}*{where}##"
@@ -59,6 +62,11 @@ class BticinoButton(ButtonEntity):
         else:
             self._frame_open = f"{DTMF_OPEN_ALT}*{where}##"
             self._frame_close = f"{DTMF_CLOSE_ALT}*{where}##"
+
+        _LOGGER.debug(
+            "Button '%s' configured: open=%s close=%s (dev=%r addr=%r)",
+            self._attr_name, self._frame_open, self._frame_close, dev, addr,
+        )
 
     @property
     def icon(self) -> str:
@@ -79,37 +87,47 @@ class BticinoButton(ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """Send open + close OWN frames to the gateway.
+        """Send open + close OWN frames to the gateway via SIP MESSAGE."""
+        sip_username = self._sip_params.get("sip_username", "")
+        sip_password = self._sip_params.get("sip_password", "")
+        sip_domain = self._sip_params.get("sip_domain", "")
+        local_ip = self._sip_params.get("local_ip", "")
 
-        The gateway closes the TCP connection after each command, so each
-        frame needs its own connection (full handshake + *99*0## each time).
-        """
-        local_ip = self._own_params["local_ip"]
-        password = self._own_params["own_password"]
+        if not sip_username or not sip_domain:
+            _LOGGER.error(
+                "Button '%s' — SIP credentials not configured. "
+                "Delete and re-add the integration to fetch them.",
+                self._attr_name,
+            )
+            return
+
+        creds = SipCredentials(
+            username=sip_username,
+            password=sip_password,
+            domain=sip_domain,
+        )
+        target = f"sip:c300x@{sip_domain}"
 
         _LOGGER.info(
-            "Button '%s' pressed — connecting to %s, will send %s then %s",
-            self._attr_name, local_ip, self._frame_open, self._frame_close,
+            "Button '%s' pressed — SIP %s → %s then %s",
+            self._attr_name, target, self._frame_open, self._frame_close,
         )
 
         try:
-            _LOGGER.info("Button '%s' — connection 1/2: sending %s", self._attr_name, self._frame_open)
-            async with BticinoOwnClient(local_ip, password) as client:
-                resp1 = await client.send_raw(self._frame_open)
-            _LOGGER.info("Button '%s' — connection 1/2 OK, gateway replied: %s", self._attr_name, resp1)
+            async with BticinoSipClient(
+                credentials=creds,
+                local_ip=local_ip or None,
+                sip_port=SIP_TLS_PORT,
+            ) as client:
+                await client.send_message(target, self._frame_open)
+                await asyncio.sleep(0.3)
+                await client.send_message(target, self._frame_close)
 
-            await asyncio.sleep(0.3)
+            _LOGGER.info("Button '%s' — SIP sequence completed successfully", self._attr_name)
 
-            _LOGGER.info("Button '%s' — connection 2/2: sending %s", self._attr_name, self._frame_close)
-            async with BticinoOwnClient(local_ip, password) as client:
-                resp2 = await client.send_raw(self._frame_close)
-            _LOGGER.info("Button '%s' — connection 2/2 OK, gateway replied: %s", self._attr_name, resp2)
-
-            _LOGGER.info("Button '%s' — sequence completed successfully", self._attr_name)
-
-        except BticinoOwnError as exc:
+        except BticinoSipError as exc:
             _LOGGER.error(
-                "Button '%s' — OWN error at %s: %s",
-                self._attr_name, local_ip, exc,
+                "Button '%s' — SIP error: %s",
+                self._attr_name, exc,
             )
             raise

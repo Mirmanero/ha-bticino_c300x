@@ -37,3 +37,7 @@ DTMF_CLOSE_ALT = "*8*22"
 CID_STANDARD = {10060, 3008}
 CID_ALT = {2009}
 CID_CAMERA = {10061}
+
+# SIP
+SIP_TLS_PORT = 5061
+API_SIP_USER = "/eliot/sip/users/plants/{plant_id}/gateway/{gw_id}"

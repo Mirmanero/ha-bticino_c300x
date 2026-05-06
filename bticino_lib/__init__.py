@@ -14,19 +14,25 @@ from .exceptions import (
     BticinoConnectionError,
     BticinoError,
     BticinoOwnError,
+    BticinoSipAuthError,
+    BticinoSipError,
 )
-from .models import DeviceInfo, GatewayInfo, PlantInfo
-from .protocol import BticinoApiClient, BticinoOwnClient
+from .models import DeviceInfo, GatewayInfo, PlantInfo, SipCredentials
+from .protocol import BticinoApiClient, BticinoOwnClient, BticinoSipClient
 
 __all__ = [
     "BticinoApiClient",
     "BticinoOwnClient",
+    "BticinoSipClient",
     "DeviceInfo",
     "GatewayInfo",
     "PlantInfo",
+    "SipCredentials",
     "BticinoError",
     "BticinoApiError",
     "BticinoAuthError",
     "BticinoConnectionError",
     "BticinoOwnError",
+    "BticinoSipError",
+    "BticinoSipAuthError",
 ]

@@ -23,3 +23,11 @@ class BticinoApiError(BticinoError):
 
 class BticinoOwnError(BticinoError):
     """Error communicating with the gateway via OWN local protocol."""
+
+
+class BticinoSipError(BticinoError):
+    """Error communicating via SIP."""
+
+
+class BticinoSipAuthError(BticinoSipError):
+    """SIP digest authentication failed."""

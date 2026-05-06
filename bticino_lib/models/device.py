@@ -20,6 +20,30 @@ class GatewayInfo:
 
 
 @dataclass
+class SipCredentials:
+    """SIP account credentials for sending door commands."""
+    username: str    # e.g. "user@ABCDEF012345.bs.iotleg.com"
+    password: str
+    domain: str      # e.g. "ABCDEF012345.bs.iotleg.com"
+
+    @property
+    def sip_uri(self) -> str:
+        u = self.username if "@" in self.username else f"{self.username}@{self.domain}"
+        return f"sip:{u}"
+
+    def to_dict(self) -> dict:
+        return {"sip_username": self.username, "sip_password": self.password, "sip_domain": self.domain}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SipCredentials":
+        return cls(
+            username=str(data["sip_username"]),
+            password=str(data["sip_password"]),
+            domain=str(data["sip_domain"]),
+        )
+
+
+@dataclass
 class DeviceInfo:
     """An activatable device parsed from the gateway configuration ZIP.
 
