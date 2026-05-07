@@ -44,6 +44,29 @@ class SipCredentials:
 
 
 @dataclass
+class TlsCertificates:
+    """TLS client certificates for mutual auth with the gateway SIP server."""
+    ca_cert_pem: str = ""
+    client_cert_pem: str = ""
+    client_key_pem: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "tls_ca_cert": self.ca_cert_pem,
+            "tls_client_cert": self.client_cert_pem,
+            "tls_client_key": self.client_key_pem,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TlsCertificates":
+        return cls(
+            ca_cert_pem=str(data.get("tls_ca_cert", "")),
+            client_cert_pem=str(data.get("tls_client_cert", "")),
+            client_key_pem=str(data.get("tls_client_key", "")),
+        )
+
+
+@dataclass
 class DeviceInfo:
     """An activatable device parsed from the gateway configuration ZIP.
 

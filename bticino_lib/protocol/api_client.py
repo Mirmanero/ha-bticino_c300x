@@ -24,6 +24,7 @@ from ..const import (
     API_PLANTS,
     API_SIGN_IN,
     API_SIP_USER,
+    API_TLS,
     APP_VERSION,
     CONF_ZIP_PASSWORD,
     HEADER_AUTH_TOKEN,
@@ -33,7 +34,7 @@ from ..const import (
     PORTAL_BASE_URL,
 )
 from ..exceptions import BticinoApiError, BticinoAuthError, BticinoConnectionError
-from ..models import DeviceInfo, GatewayInfo, PlantInfo, SipCredentials
+from ..models import DeviceInfo, GatewayInfo, PlantInfo, SipCredentials, TlsCertificates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -282,6 +283,26 @@ class BticinoApiClient:
 
         _LOGGER.debug("SIP credentials acquired for gateway %s", gateway_id)
         return SipCredentials(username=username, password=password, domain=domain)
+
+    async def get_tls_certificates(self, device_id: str) -> TlsCertificates:
+        """Fetch TLS client certificates for mutual auth with the gateway SIP server."""
+        path = API_TLS.format(device_id=device_id)
+        data = await self._request("GET", path)
+
+        def _decode(key: str) -> str:
+            raw = data.get(key, "") if isinstance(data, dict) else ""
+            if not raw:
+                return ""
+            try:
+                return base64.b64decode(raw).decode("utf-8")
+            except Exception:
+                return raw
+
+        ca   = _decode("caCert") or _decode("ca_cert") or _decode("rootCa") or ""
+        cert = _decode("clientCert") or _decode("client_cert") or ""
+        key  = _decode("clientKey") or _decode("client_key") or ""
+        _LOGGER.debug("TLS certificates acquired for device %s (cert present: %s)", device_id, bool(cert))
+        return TlsCertificates(ca_cert_pem=ca, client_cert_pem=cert, client_key_pem=key)
 
     # ------------------------------------------------------------------
 # ZIP parsing helpers

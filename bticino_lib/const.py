@@ -41,3 +41,4 @@ CID_CAMERA = {10061}
 # SIP
 SIP_TLS_PORT = 5061
 API_SIP_USER = "/eliot/sip/users/plants/{plant_id}/gateway/{gw_id}"
+API_TLS = "/eliot/sip/tls/{device_id}"

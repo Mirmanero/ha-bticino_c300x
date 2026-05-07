@@ -17,7 +17,7 @@ from .exceptions import (
     BticinoSipAuthError,
     BticinoSipError,
 )
-from .models import DeviceInfo, GatewayInfo, PlantInfo, SipCredentials
+from .models import DeviceInfo, GatewayInfo, PlantInfo, SipCredentials, TlsCertificates
 from .protocol import BticinoApiClient, BticinoOwnClient, BticinoSipClient
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "GatewayInfo",
     "PlantInfo",
     "SipCredentials",
+    "TlsCertificates",
     "BticinoError",
     "BticinoApiError",
     "BticinoAuthError",

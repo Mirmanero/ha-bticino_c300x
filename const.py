@@ -13,6 +13,9 @@ CONF_DEVICES = "devices"
 CONF_SIP_USERNAME = "sip_username"
 CONF_SIP_PASSWORD = "sip_password"
 CONF_SIP_DOMAIN = "sip_domain"
+CONF_TLS_CA_CERT = "tls_ca_cert"
+CONF_TLS_CLIENT_CERT = "tls_client_cert"
+CONF_TLS_CLIENT_KEY = "tls_client_key"
 
 # Runtime data keys
 DATA_OWN_PARAMS = "own_params"

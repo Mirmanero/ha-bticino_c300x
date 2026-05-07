@@ -29,6 +29,9 @@ from .const import (
     CONF_SIP_DOMAIN,
     CONF_SIP_PASSWORD,
     CONF_SIP_USERNAME,
+    CONF_TLS_CA_CERT,
+    CONF_TLS_CLIENT_CERT,
+    CONF_TLS_CLIENT_KEY,
     CONF_USERNAME,
     DOMAIN,
 )
@@ -82,6 +85,7 @@ async def _cloud_setup(username: str, password: str) -> dict:
             _LOGGER.warning("Could not fetch plant setup: %s", exc)
 
         sip_username = sip_password = sip_domain = ""
+        tls_ca = tls_cert = tls_key = ""
         try:
             device_id = _ha_device_id(gateway.gateway_id)
             sip = await api.get_sip_credentials(plant.plant_id, gateway.gateway_id, device_id)
@@ -89,6 +93,14 @@ async def _cloud_setup(username: str, password: str) -> dict:
             sip_password = sip.password
             sip_domain = sip.domain
             _LOGGER.info("SIP credentials acquired for gateway %s", gateway.gateway_id)
+            try:
+                tls = await api.get_tls_certificates(device_id)
+                tls_ca = tls.ca_cert_pem
+                tls_cert = tls.client_cert_pem
+                tls_key = tls.client_key_pem
+                _LOGGER.info("TLS certificates acquired (cert present: %s)", bool(tls_cert))
+            except Exception as exc:
+                _LOGGER.warning("Could not fetch TLS certificates: %s", exc)
         except Exception as exc:
             _LOGGER.warning("Could not fetch SIP credentials: %s", exc)
 
@@ -103,6 +115,9 @@ async def _cloud_setup(username: str, password: str) -> dict:
             CONF_SIP_USERNAME: sip_username,
             CONF_SIP_PASSWORD: sip_password,
             CONF_SIP_DOMAIN: sip_domain,
+            CONF_TLS_CA_CERT: tls_ca,
+            CONF_TLS_CLIENT_CERT: tls_cert,
+            CONF_TLS_CLIENT_KEY: tls_key,
         }
 
 

@@ -17,10 +17,12 @@ import random
 import re
 import ssl
 import string
+import tempfile
+import os
 from typing import Optional
 
 from ..exceptions import BticinoSipAuthError, BticinoSipError
-from ..models import SipCredentials
+from ..models import SipCredentials, TlsCertificates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,10 +60,37 @@ def _parse_www_auth(header_value: str) -> dict[str, str]:
     return result
 
 
-def _build_ssl_context() -> ssl.SSLContext:
+def _build_ssl_context(tls: Optional[TlsCertificates] = None) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    # Allow older TLS versions the gateway may require
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1
+    except (AttributeError, ValueError):
+        pass
+
+    if tls and tls.client_cert_pem and tls.client_key_pem:
+        cert_file = key_file = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as cf:
+                cf.write(tls.client_cert_pem)
+                cert_file = cf.name
+            with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as kf:
+                kf.write(tls.client_key_pem)
+                key_file = kf.name
+            ctx.load_cert_chain(cert_file, key_file)
+            _LOGGER.debug("Mutual TLS: client certificate loaded")
+        except Exception as exc:
+            _LOGGER.warning("Could not load client TLS certificate: %s", exc)
+        finally:
+            for path in (cert_file, key_file):
+                if path:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
     return ctx
 
 
@@ -139,11 +168,13 @@ class BticinoSipClient:
     def __init__(
         self,
         credentials: SipCredentials,
+        tls: Optional[TlsCertificates] = None,
         local_ip: Optional[str] = None,
         sip_port: int = 5061,
         timeout: float = 15.0,
     ) -> None:
         self._creds = credentials
+        self._tls = tls
         self._local_ip = local_ip
         self._port = sip_port
         self._timeout = timeout
@@ -160,7 +191,7 @@ class BticinoSipClient:
 
     async def connect(self) -> None:
         host = self._local_ip or self._creds.domain
-        ssl_ctx = _build_ssl_context()
+        ssl_ctx = _build_ssl_context(self._tls)
         _LOGGER.debug("SIP connecting to %s:%s", host, self._port)
         try:
             self._reader, self._writer = await asyncio.wait_for(

@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .bticino_lib import BticinoSipClient
 from .bticino_lib.exceptions import BticinoSipError
-from .bticino_lib.models import SipCredentials
+from .bticino_lib.models import SipCredentials, TlsCertificates
 from .bticino_lib.const import CID_STANDARD, DTMF_CLOSE_ALT, DTMF_CLOSE_STD, DTMF_OPEN_ALT, DTMF_OPEN_STD, SIP_TLS_PORT
 from .const import DATA_DEVICES, DATA_OWN_PARAMS, DATA_SIP_PARAMS, DOMAIN
 
@@ -106,16 +106,23 @@ class BticinoButton(ButtonEntity):
             password=sip_password,
             domain=sip_domain,
         )
+        tls = TlsCertificates(
+            ca_cert_pem=self._sip_params.get("tls_ca_cert", ""),
+            client_cert_pem=self._sip_params.get("tls_client_cert", ""),
+            client_key_pem=self._sip_params.get("tls_client_key", ""),
+        )
         target = f"sip:c300x@{sip_domain}"
 
         _LOGGER.info(
-            "Button '%s' pressed — SIP %s → %s then %s",
+            "Button '%s' pressed — SIP %s → %s then %s (cert: %s)",
             self._attr_name, target, self._frame_open, self._frame_close,
+            bool(tls.client_cert_pem),
         )
 
         try:
             async with BticinoSipClient(
                 credentials=creds,
+                tls=tls,
                 local_ip=local_ip or None,
                 sip_port=SIP_TLS_PORT,
             ) as client:
