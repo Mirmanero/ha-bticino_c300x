@@ -1,4 +1,4 @@
-"""Button entities for Bticino C300X — door activation via SIP MESSAGE."""
+"""Button entities for Bticino C300X — door activation via OWN (local) or SIP (remote)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,18 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo as HaDeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .bticino_lib import BticinoSipClient
-from .bticino_lib.exceptions import BticinoSipError
+from .bticino_lib import BticinoOwnClient, BticinoSipClient
+from .bticino_lib.exceptions import BticinoOwnError, BticinoSipError
 from .bticino_lib.models import SipCredentials, TlsCertificates
-from .bticino_lib.const import CID_STANDARD, DTMF_CLOSE_ALT, DTMF_CLOSE_STD, DTMF_OPEN_ALT, DTMF_OPEN_STD, SIP_TLS_PORT
+from .bticino_lib.const import (
+    CID_STANDARD,
+    DTMF_CLOSE_ALT,
+    DTMF_CLOSE_STD,
+    DTMF_OPEN_ALT,
+    DTMF_OPEN_STD,
+    OWN_DEFAULT_PORT,
+    SIP_TLS_PORT,
+)
 from .const import DATA_DEVICES, DATA_OWN_PARAMS, DATA_SIP_PARAMS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,7 +42,12 @@ async def async_setup_entry(
 
 
 class BticinoButton(ButtonEntity):
-    """A button that sends door-activation OWN frames via SIP MESSAGE."""
+    """A button that sends door-activation OWN frames.
+
+    Transport priority:
+      1. OWN local  — TCP to local gateway IP, no TLS, instant (preferred)
+      2. SIP remote — TLS to cloud SIP server (fallback when not on LAN)
+    """
 
     _attr_has_entity_name = True
 
@@ -87,16 +100,46 @@ class BticinoButton(ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """Send open + close OWN frames to the gateway via SIP MESSAGE."""
+        """Send open + close OWN frames — OWN local first, SIP remote as fallback."""
+        local_ip = self._own_params.get("local_ip", "")
+        own_password = self._own_params.get("own_password", "")
+
+        if local_ip:
+            try:
+                await self._press_via_own(local_ip, own_password)
+                return
+            except BticinoOwnError as exc:
+                _LOGGER.warning(
+                    "Button '%s' — OWN local failed (%s), falling back to SIP remote",
+                    self._attr_name, exc,
+                )
+
+        await self._press_via_sip()
+
+    async def _press_via_own(self, local_ip: str, password: str) -> None:
+        _LOGGER.info(
+            "Button '%s' — OWN %s → %s then %s",
+            self._attr_name, local_ip, self._frame_open, self._frame_close,
+        )
+        async with BticinoOwnClient(
+            host=local_ip,
+            password=password,
+            port=OWN_DEFAULT_PORT,
+        ) as client:
+            await client.send_raw(self._frame_open)
+            await asyncio.sleep(0.3)
+            await client.send_raw(self._frame_close)
+
+        _LOGGER.info("Button '%s' — OWN sequence completed", self._attr_name)
+
+    async def _press_via_sip(self) -> None:
         sip_username = self._sip_params.get("sip_username", "")
         sip_password = self._sip_params.get("sip_password", "")
         sip_domain = self._sip_params.get("sip_domain", "")
-        local_ip = self._sip_params.get("local_ip", "")
 
         if not sip_username or not sip_domain:
             _LOGGER.error(
-                "Button '%s' — SIP credentials not configured. "
-                "Delete and re-add the integration to fetch them.",
+                "Button '%s' — no OWN local IP and no SIP credentials configured.",
                 self._attr_name,
             )
             return
@@ -114,7 +157,7 @@ class BticinoButton(ButtonEntity):
         target = f"sip:c300x@{sip_domain}"
 
         _LOGGER.info(
-            "Button '%s' pressed — SIP %s → %s then %s (cert: %s)",
+            "Button '%s' — SIP %s → %s then %s (cert: %s)",
             self._attr_name, target, self._frame_open, self._frame_close,
             bool(tls.client_cert_pem),
         )
@@ -123,18 +166,15 @@ class BticinoButton(ButtonEntity):
             async with BticinoSipClient(
                 credentials=creds,
                 tls=tls,
-                local_ip=local_ip or None,
+                local_ip=None,
                 sip_port=SIP_TLS_PORT,
             ) as client:
                 await client.send_message(target, self._frame_open)
                 await asyncio.sleep(0.3)
                 await client.send_message(target, self._frame_close)
 
-            _LOGGER.info("Button '%s' — SIP sequence completed successfully", self._attr_name)
+            _LOGGER.info("Button '%s' — SIP sequence completed", self._attr_name)
 
         except BticinoSipError as exc:
-            _LOGGER.error(
-                "Button '%s' — SIP error: %s",
-                self._attr_name, exc,
-            )
+            _LOGGER.error("Button '%s' — SIP error: %s", self._attr_name, exc)
             raise
