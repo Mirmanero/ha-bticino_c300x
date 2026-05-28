@@ -129,6 +129,17 @@ class BticinoButton(ButtonEntity):
         )
         target = f"sip:c300x@{sip_domain}"
 
+        _LOGGER.debug(
+            "Button '%s' — SIP params: username=%r domain=%r local_ip=%r "
+            "ca_cert=%s client_cert=%s client_key=%s",
+            self._attr_name,
+            sip_username,
+            sip_domain,
+            local_ip,
+            bool(tls.ca_cert_pem),
+            bool(tls.client_cert_pem),
+            bool(tls.client_key_pem),
+        )
         _LOGGER.info(
             "Button '%s' — SIP TLS %s:%s → %s then %s (client_cert: %s)",
             self._attr_name, local_ip, SIP_TLS_PORT,
