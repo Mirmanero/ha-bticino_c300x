@@ -1,4 +1,4 @@
-"""Button entities for Bticino C300X — door activation via SIP MESSAGE local."""
+"""Button entities for Bticino C300X — door activation via SIP MESSAGE (TLS 5061)."""
 
 from __future__ import annotations
 
@@ -26,8 +26,6 @@ from .const import DATA_DEVICES, DATA_OWN_PARAMS, DATA_SIP_PARAMS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-SIP_LOCAL_PORT = 5060   # plain TCP, no TLS — gateway espone SIP in chiaro sulla LAN
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -43,12 +41,7 @@ async def async_setup_entry(
 
 
 class BticinoButton(ButtonEntity):
-    """A button that opens a door via SIP MESSAGE to the local gateway.
-
-    Transport order:
-      1. SIP local plain TCP 5060  — no TLS, works su LAN con Python 3.14
-      2. SIP local TLS 5061        — fallback se il gateway richiede TLS locale
-    """
+    """A button that opens a door via SIP MESSAGE to the local gateway (TLS 5061)."""
 
     _attr_has_entity_name = True
 
@@ -64,9 +57,9 @@ class BticinoButton(ButtonEntity):
         self._device = device
 
         cid  = device["cid"]
-        addr = device["addr"]           # parte addr (da XML: p_default/address o ist.where)
-        dev  = device.get("dev", "")    # parte dev  (da XML: p_default/dev o obj.dev)
-        # WHERE = dev + addr (identico a come l'app ufficiale costruisce il frame SIP)
+        addr = device["addr"]        # parte addr (p_default/address o ist.where)
+        dev  = device.get("dev", "") # parte dev  (p_default/dev o obj.dev)
+        # WHERE = dev + addr — identico a VctDoorLockTrigger.a() nell'app ufficiale
         where = f"{dev}{addr}" if dev else addr
 
         self._attr_unique_id = f"{entry_id}_{cid}_{addr}"
@@ -103,7 +96,7 @@ class BticinoButton(ButtonEntity):
         )
 
     async def async_press(self) -> None:
-        """Send open + close SIP MESSAGE to the local gateway."""
+        """Send open + close SIP MESSAGE to the local gateway via TLS 5061."""
         sip_username = self._sip_params.get("sip_username", "")
         sip_password = self._sip_params.get("sip_password", "")
         sip_domain   = self._sip_params.get("sip_domain", "")
@@ -111,7 +104,15 @@ class BticinoButton(ButtonEntity):
 
         if not sip_username or not sip_domain:
             _LOGGER.error(
-                "Button '%s' — credenziali SIP non configurate, elimina e riconfigura l'integrazione.",
+                "Button '%s' — credenziali SIP non configurate, "
+                "elimina e riconfigura l'integrazione.",
+                self._attr_name,
+            )
+            return
+
+        if not local_ip:
+            _LOGGER.error(
+                "Button '%s' — local_ip non configurato.",
                 self._attr_name,
             )
             return
@@ -128,61 +129,27 @@ class BticinoButton(ButtonEntity):
         )
         target = f"sip:c300x@{sip_domain}"
 
-        # Tenta prima SIP plain TCP sulla LAN, poi TLS come fallback
-        if local_ip:
-            try:
-                await self._send_sip(
-                    creds, tls, target,
-                    host=local_ip, port=SIP_LOCAL_PORT, use_tls=False,
-                )
-                return
-            except BticinoSipError as exc:
-                _LOGGER.warning(
-                    "Button '%s' — SIP locale plain 5060 fallito (%s), provo TLS 5061",
-                    self._attr_name, exc,
-                )
-            try:
-                await self._send_sip(
-                    creds, tls, target,
-                    host=local_ip, port=SIP_TLS_PORT, use_tls=True,
-                )
-                return
-            except BticinoSipError as exc:
-                _LOGGER.error(
-                    "Button '%s' — SIP locale TLS 5061 fallito: %s",
-                    self._attr_name, exc,
-                )
-                raise
-        else:
-            _LOGGER.error(
-                "Button '%s' — local_ip non configurato, impossibile raggiungere il gateway.",
-                self._attr_name,
-            )
-
-    async def _send_sip(
-        self,
-        creds: SipCredentials,
-        tls: TlsCertificates,
-        target: str,
-        host: str,
-        port: int,
-        use_tls: bool,
-    ) -> None:
-        proto = "TLS" if use_tls else "TCP"
         _LOGGER.info(
-            "Button '%s' — SIP %s %s:%s → %s then %s",
-            self._attr_name, proto, host, port,
+            "Button '%s' — SIP TLS %s:%s → %s then %s (client_cert: %s)",
+            self._attr_name, local_ip, SIP_TLS_PORT,
             self._frame_open, self._frame_close,
+            bool(tls.client_cert_pem),
         )
-        async with BticinoSipClient(
-            credentials=creds,
-            tls=tls if use_tls else None,
-            local_ip=host,
-            sip_port=port,
-            use_tls=use_tls,
-        ) as client:
-            await client.send_message(target, self._frame_open)
-            await asyncio.sleep(0.3)
-            await client.send_message(target, self._frame_close)
 
-        _LOGGER.info("Button '%s' — SIP %s sequenza completata", self._attr_name, proto)
+        try:
+            async with BticinoSipClient(
+                credentials=creds,
+                tls=tls,
+                local_ip=local_ip,
+                sip_port=SIP_TLS_PORT,
+                use_tls=True,
+            ) as client:
+                await client.send_message(target, self._frame_open)
+                await asyncio.sleep(0.3)
+                await client.send_message(target, self._frame_close)
+
+            _LOGGER.info("Button '%s' — SIP sequenza completata", self._attr_name)
+
+        except BticinoSipError as exc:
+            _LOGGER.error("Button '%s' — SIP error: %s", self._attr_name, exc)
+            raise

@@ -61,13 +61,36 @@ def _parse_www_auth(header_value: str) -> dict[str, str]:
 
 
 def _build_ssl_context(tls: Optional[TlsCertificates] = None) -> ssl.SSLContext:
+    """Build an SSL context permissive enough for the gateway's embedded TLS stack.
+
+    The C300X uses an old TLS stack (TLS 1.0/1.1, legacy cipher suites).
+    We disable hostname checks, cert verification, security level restrictions
+    and try to re-enable TLS 1.0/1.1 if the underlying OpenSSL still supports them.
+    """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    # Allow older TLS versions the gateway may require
+
+    # Allow all cipher suites including legacy ones (RC4, DES, etc.)
+    try:
+        ctx.set_ciphers("ALL:@SECLEVEL=0")
+    except ssl.SSLError:
+        try:
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+        except ssl.SSLError:
+            pass
+
+    # Try to re-enable TLS 1.0 / 1.1 (disabled by default in Python 3.10+)
+    for flag_name in ("OP_NO_TLSv1", "OP_NO_TLSv1_1"):
+        flag = getattr(ssl, flag_name, None)
+        if flag:
+            try:
+                ctx.options &= ~flag
+            except Exception:
+                pass
     try:
         ctx.minimum_version = ssl.TLSVersion.TLSv1
-    except (AttributeError, ValueError):
+    except (AttributeError, ValueError, ssl.SSLError):
         pass
 
     if tls and tls.client_cert_pem and tls.client_key_pem:
