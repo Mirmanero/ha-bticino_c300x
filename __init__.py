@@ -54,6 +54,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DATA_DEVICES: entry.data.get(CONF_DEVICES, []),
     }
 
+    d = hass.data[DOMAIN][entry.entry_id]
+    sip = d[DATA_SIP_PARAMS]
+    _LOGGER.debug(
+        "Config entry loaded — gateway_id=%s local_ip=%s sip_username=%s sip_domain=%s "
+        "tls_ca_cert=%s tls_client_cert=%s tls_client_key=%s devices=%d",
+        entry.data.get(CONF_GATEWAY_ID),
+        entry.data.get(CONF_LOCAL_IP),
+        sip.get("sip_username"),
+        sip.get("sip_domain"),
+        bool(sip.get("tls_ca_cert")),
+        bool(sip.get("tls_client_cert")),
+        bool(sip.get("tls_client_key")),
+        len(d[DATA_DEVICES]),
+    )
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
