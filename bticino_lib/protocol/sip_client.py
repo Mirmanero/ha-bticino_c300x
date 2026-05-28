@@ -95,9 +95,17 @@ def _build_ssl_context(tls: Optional[TlsCertificates] = None) -> ssl.SSLContext:
 
 
 class _SipMessageBuilder:
-    def __init__(self, local_uri: str, contact_host: str, contact_port: int = 5061) -> None:
+    def __init__(
+        self,
+        local_uri: str,
+        contact_host: str,
+        contact_port: int = 5060,
+        use_tls: bool = False,
+    ) -> None:
         self.local_uri = local_uri
-        self.contact = f"<sip:{contact_host}:{contact_port};transport=TLS>"
+        transport = "TLS" if use_tls else "TCP"
+        self.contact = f"<sip:{contact_host}:{contact_port};transport={transport}>"
+        self._transport = transport
         self._cseq = 0
 
     def _next_cseq(self, method: str) -> str:
@@ -115,7 +123,7 @@ class _SipMessageBuilder:
         cseq = self._next_cseq("REGISTER")
         lines = [
             f"REGISTER {server_uri} SIP/2.0",
-            f"Via: SIP/2.0/TLS {self.contact[1:-1]};branch={via_branch}",
+            f"Via: SIP/2.0/{self._transport} {self.contact[1:-1]};branch={via_branch}",
             f"From: <{self.local_uri}>;tag={_rand_string(8)}",
             f"To: <{self.local_uri}>",
             f"Call-ID: {call_id}",
@@ -141,7 +149,7 @@ class _SipMessageBuilder:
         body_bytes = body.encode("utf-8")
         lines = [
             f"MESSAGE {target_uri} SIP/2.0",
-            f"Via: SIP/2.0/TLS {self.contact[1:-1]};branch={via_branch}",
+            f"Via: SIP/2.0/{self._transport} {self.contact[1:-1]};branch={via_branch}",
             f"From: <{self.local_uri}>;tag={_rand_string(8)}",
             f"To: <{target_uri}>",
             f"Call-ID: {call_id}",
@@ -157,7 +165,11 @@ class _SipMessageBuilder:
 
 
 class BticinoSipClient:
-    """Async SIP/TLS client for Bticino C300X door activation.
+    """Async SIP client for Bticino C300X door activation.
+
+    When use_tls=False (default for local connections) a plain TCP connection
+    is used (port 5060).  When use_tls=True a TLS connection is used (port
+    5061) — required for the remote cloud SIP server.
 
     Usage::
 
@@ -170,13 +182,15 @@ class BticinoSipClient:
         credentials: SipCredentials,
         tls: Optional[TlsCertificates] = None,
         local_ip: Optional[str] = None,
-        sip_port: int = 5061,
+        sip_port: int = 5060,
+        use_tls: bool = False,
         timeout: float = 15.0,
     ) -> None:
         self._creds = credentials
         self._tls = tls
         self._local_ip = local_ip
         self._port = sip_port
+        self._use_tls = use_tls
         self._timeout = timeout
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -191,8 +205,9 @@ class BticinoSipClient:
 
     async def connect(self) -> None:
         host = self._local_ip or self._creds.domain
-        ssl_ctx = _build_ssl_context(self._tls)
-        _LOGGER.debug("SIP connecting to %s:%s", host, self._port)
+        ssl_ctx = _build_ssl_context(self._tls) if self._use_tls else None
+        proto = "TLS" if self._use_tls else "TCP"
+        _LOGGER.debug("SIP connecting to %s:%s (%s)", host, self._port, proto)
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(host, self._port, ssl=ssl_ctx),
@@ -202,7 +217,7 @@ class BticinoSipClient:
             raise BticinoSipError(f"Timeout connecting to {host}:{self._port}") from exc
         except OSError as exc:
             raise BticinoSipError(f"Cannot connect to {host}:{self._port}: {exc}") from exc
-        _LOGGER.debug("SIP TLS connection established")
+        _LOGGER.debug("SIP %s connection established to %s:%s", proto, host, self._port)
 
     async def close(self) -> None:
         if self._writer:
@@ -270,6 +285,7 @@ class BticinoSipClient:
             local_uri=self._creds.sip_uri,
             contact_host=contact_host,
             contact_port=self._port,
+            use_tls=self._use_tls,
         )
 
     def _build_digest(self, challenge_response: str, method: str, uri: str) -> str:
