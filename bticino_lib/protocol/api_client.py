@@ -24,7 +24,7 @@ from ..const import (
     API_PLANTS,
     API_SIGN_IN,
     API_SIP_USER,
-    API_TLS,
+    API_SIGNCERT,
     APP_VERSION,
     CONF_ZIP_PASSWORD,
     HEADER_AUTH_TOKEN,
@@ -284,25 +284,78 @@ class BticinoApiClient:
         _LOGGER.debug("SIP credentials acquired for gateway %s", gateway_id)
         return SipCredentials(username=username, password=password, domain=domain)
 
-    async def get_tls_certificates(self, device_id: str) -> TlsCertificates:
-        """Fetch TLS client certificates for mutual auth with the gateway SIP server."""
-        path = API_TLS.format(device_id=device_id)
-        data = await self._request("GET", path)
+    async def get_tls_certificates(self, sip_account: str) -> TlsCertificates:
+        """Generate a CSR locally and request certificate signing from the cloud portal.
 
-        def _decode(key: str) -> str:
-            raw = data.get(key, "") if isinstance(data, dict) else ""
-            if not raw:
-                return ""
-            try:
-                return base64.b64decode(raw).decode("utf-8")
-            except Exception:
-                return raw
+        The private key is generated on this machine and never sent to the server.
+        The server signs the public key (CSR) and returns the certificate in a ZIP.
+        Same flow as the official Android app (VctManageSipUsersController / C0924e.java).
+        """
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+        except ImportError as exc:
+            raise BticinoApiError("cryptography library not available") from exc
 
-        ca   = _decode("caCert") or _decode("ca_cert") or _decode("rootCa") or ""
-        cert = _decode("clientCert") or _decode("client_cert") or ""
-        key  = _decode("clientKey") or _decode("client_key") or ""
-        _LOGGER.debug("TLS certificates acquired for device %s (cert present: %s)", device_id, bool(cert))
-        return TlsCertificates(ca_cert_pem=ca, client_cert_pem=cert, client_key_pem=key)
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "IT"),
+                x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "Italy"),
+                x509.NameAttribute(NameOID.LOCALITY_NAME, "Varese"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Bticino spa"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "DSI-PQS"),
+                x509.NameAttribute(NameOID.COMMON_NAME, sip_account),
+            ]))
+            .sign(private_key, hashes.SHA256())
+        )
+
+        private_key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("utf-8")
+
+        # App sends CSR with newlines replaced by spaces (verified in C0924e.java)
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode("utf-8").replace("\n", " ")
+
+        _LOGGER.debug("Requesting TLS certificate signing for CN=%s", sip_account)
+        data = await self._request(
+            "POST", API_SIGNCERT,
+            json={"CommonName": sip_account, "CSR": csr_pem},
+        )
+
+        payload_b64 = data.get("payload", "") if isinstance(data, dict) else ""
+        if not payload_b64:
+            _LOGGER.warning("TLS signcert: empty payload for %s — no certificate issued", sip_account)
+            return TlsCertificates()
+
+        try:
+            zip_bytes = base64.b64decode(payload_b64)
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                cert_pem = ca_pem = ""
+                for name in zf.namelist():
+                    content = zf.read(name).decode("utf-8", errors="replace")
+                    if "ca-chain" in name:
+                        ca_pem = content
+                    elif name.endswith(".cert.pem"):
+                        cert_pem = content
+        except Exception as exc:
+            raise BticinoApiError(f"Cannot parse TLS certificate ZIP: {exc}") from exc
+
+        _LOGGER.info(
+            "TLS certificates acquired for %s (cert=%s ca=%s)",
+            sip_account, bool(cert_pem), bool(ca_pem),
+        )
+        return TlsCertificates(
+            ca_cert_pem=ca_pem,
+            client_cert_pem=cert_pem,
+            client_key_pem=private_key_pem,
+        )
 
     # ------------------------------------------------------------------
 # ZIP parsing helpers

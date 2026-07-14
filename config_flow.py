@@ -94,7 +94,7 @@ async def _cloud_setup(username: str, password: str) -> dict:
             sip_domain = sip.domain
             _LOGGER.info("SIP credentials acquired for gateway %s", gateway.gateway_id)
             try:
-                tls = await api.get_tls_certificates(device_id)
+                tls = await api.get_tls_certificates(sip_username)
                 tls_ca = tls.ca_cert_pem
                 tls_cert = tls.client_cert_pem
                 tls_key = tls.client_key_pem

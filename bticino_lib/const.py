@@ -12,6 +12,7 @@ API_GW_LIST = "/eliot/plants/{plant_id}/gateway/"
 API_GW_INFO = "/eliot/plants/{plant_id}/gateway/{gw_id}"
 API_GW_CONF = "/eliot/plants/{plant_id}/gateway/{gw_id}/conf"
 API_SIP_USER = "/eliot/sip/users/plants/{plant_id}/gateway/{gw_id}"
+API_SIGNCERT = "/eliot/users/cert/signcert"
 
 # HTTP headers
 HEADER_AUTH_TOKEN = "auth_token"
@@ -40,5 +41,3 @@ CID_CAMERA = {10061}
 
 # SIP
 SIP_TLS_PORT = 5061
-API_SIP_USER = "/eliot/sip/users/plants/{plant_id}/gateway/{gw_id}"
-API_TLS = "/eliot/sip/tls/{device_id}"
