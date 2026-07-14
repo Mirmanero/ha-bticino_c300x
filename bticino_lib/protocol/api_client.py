@@ -301,6 +301,9 @@ class BticinoApiClient:
 
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
+        # X.509 CN is limited to 64 chars; the server uses the JSON "CommonName" field for
+        # account lookup, so truncating the CSR CN doesn't affect certificate issuance.
+        cn = sip_account[:64]
         csr = (
             x509.CertificateSigningRequestBuilder()
             .subject_name(x509.Name([
@@ -309,7 +312,7 @@ class BticinoApiClient:
                 x509.NameAttribute(NameOID.LOCALITY_NAME, "Varese"),
                 x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Bticino spa"),
                 x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "DSI-PQS"),
-                x509.NameAttribute(NameOID.COMMON_NAME, sip_account),
+                x509.NameAttribute(NameOID.COMMON_NAME, cn),
             ]))
             .sign(private_key, hashes.SHA256())
         )
@@ -320,7 +323,6 @@ class BticinoApiClient:
             encryption_algorithm=serialization.NoEncryption(),
         ).decode("utf-8")
 
-        # App sends CSR with newlines replaced by spaces (verified in C0924e.java)
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode("utf-8").replace("\n", " ")
 
         _LOGGER.debug("Requesting TLS certificate signing for CN=%s", sip_account)
