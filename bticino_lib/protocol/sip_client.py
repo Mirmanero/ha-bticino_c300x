@@ -306,8 +306,9 @@ class BticinoSipClient:
             self._registered = False
 
     async def send_message(self, target_uri: str, body: str) -> None:
-        # The local gateway does not implement REGISTER — send MESSAGE directly.
-        # If the gateway asks for auth (401), retry with digest credentials.
+        if not self._registered:
+            await self._register()
+
         builder = self._make_builder()
         call_id = _callid()
         request = builder.message(target_uri, body, call_id)
@@ -361,7 +362,9 @@ class BticinoSipClient:
         raise BticinoSipError(f"Unexpected REGISTER response: {response[:200]}")
 
     def _make_builder(self) -> _SipMessageBuilder:
-        contact_host = self._local_ip or self._creds.domain
+        # Use the SIP domain (not the local IP) in Via/Contact headers — same as Linphone
+        # which uses "domain;maddr=local_ip" so headers carry the domain name.
+        contact_host = self._creds.domain
         return _SipMessageBuilder(
             local_uri=self._creds.sip_uri,
             contact_host=contact_host,
