@@ -182,6 +182,26 @@ class BticinoApiClient:
     # Internal HTTP helpers
     # ------------------------------------------------------------------
 
+    async def _request_bytes(self, method: str, path: str, *, json: dict | None = None) -> bytes:
+        url = f"{self._base_url}{path}"
+        headers = {HEADER_PRJ_NAME: "C3X", "Content-Type": "application/json"}
+        if self._token:
+            headers[HEADER_AUTH_TOKEN] = self._token
+        try:
+            async with self._session.request(
+                method, url, headers=headers, json=json, ssl=True
+            ) as resp:
+                _LOGGER.debug("%s %s -> %s (bytes)", method, url, resp.status)
+                if resp.status >= 400:
+                    text = await resp.text()
+                    raise BticinoApiError(
+                        f"API error {resp.status} on {method} {path}: {text}",
+                        status_code=resp.status,
+                    )
+                return await resp.read()
+        except aiohttp.ClientConnectionError as exc:
+            raise BticinoConnectionError(f"Cannot connect to {self._base_url}") from exc
+
     async def _request_raw(self, method: str, path: str) -> str:
         url = f"{self._base_url}{path}"
         headers = {
@@ -353,19 +373,18 @@ class BticinoApiClient:
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode("utf-8").replace("\n", " ")
 
         _LOGGER.debug("Requesting TLS certificate signing for CN=%s", sip_account)
-        data = await self._request(
+        # Response is the raw ZIP binary, not JSON
+        raw = await self._request_bytes(
             "POST", API_SIGNCERT,
             json={"CommonName": sip_account, "CSR": csr_pem},
         )
 
-        payload_b64 = data.get("payload", "") if isinstance(data, dict) else ""
-        if not payload_b64:
-            _LOGGER.warning("TLS signcert: empty payload for %s — no certificate issued", sip_account)
+        if not raw:
+            _LOGGER.warning("TLS signcert: empty response for %s", sip_account)
             return TlsCertificates()
 
         try:
-            zip_bytes = base64.b64decode(payload_b64)
-            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
                 cert_pem = ca_pem = ""
                 for name in zf.namelist():
                     content = zf.read(name).decode("utf-8", errors="replace")
