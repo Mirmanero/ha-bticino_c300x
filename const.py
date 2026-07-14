@@ -21,3 +21,7 @@ CONF_TLS_CLIENT_KEY = "tls_client_key"
 DATA_OWN_PARAMS = "own_params"
 DATA_DEVICES = "devices"
 DATA_SIP_PARAMS = "sip_params"
+DATA_DOORBELL_LISTENER = "doorbell_listener"
+
+# HA event fired when doorbell rings
+EVENT_DOORBELL = "bticino_c300x_doorbell"

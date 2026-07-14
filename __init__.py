@@ -5,11 +5,14 @@ Works local-only via OWN protocol after initial cloud setup.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .bticino_lib import BticinoSipListener
+from .bticino_lib.models import SipCredentials, TlsCertificates
 from .const import (
     CONF_DEVICES,
     CONF_GATEWAY_ID,
@@ -22,6 +25,7 @@ from .const import (
     CONF_TLS_CLIENT_CERT,
     CONF_TLS_CLIENT_KEY,
     DATA_DEVICES,
+    DATA_DOORBELL_LISTENER,
     DATA_OWN_PARAMS,
     DATA_SIP_PARAMS,
     DOMAIN,
@@ -29,7 +33,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["button"]
+PLATFORMS = ["button", "binary_sensor"]
+
+_LISTENER_TASK_KEY = "doorbell_task"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -69,12 +75,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         len(d[DATA_DEVICES]),
     )
 
+    # Start SIP listener for doorbell detection if SIP is configured
+    listener = None
+    if sip.get("sip_username") and sip.get("sip_domain"):
+        creds = SipCredentials(
+            username=sip["sip_username"],
+            password=sip["sip_password"],
+            domain=sip["sip_domain"],
+        )
+        tls = TlsCertificates(
+            ca_cert_pem=sip.get("tls_ca_cert", ""),
+            client_cert_pem=sip.get("tls_client_cert", ""),
+            client_key_pem=sip.get("tls_client_key", ""),
+        )
+        listener = BticinoSipListener(
+            credentials=creds,
+            tls=tls,
+            local_ip=sip.get("local_ip", ""),
+            on_invite=lambda: None,  # replaced by binary_sensor after platform setup
+        )
+        task = hass.async_create_background_task(
+            listener.start(),
+            name=f"bticino_sip_listener_{entry.entry_id}",
+        )
+        d[_LISTENER_TASK_KEY] = task
+    else:
+        _LOGGER.warning("Bticino: SIP not configured — doorbell detection disabled")
+
+    d[DATA_DOORBELL_LISTENER] = listener
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    d = hass.data[DOMAIN].get(entry.entry_id, {})
+
+    listener: BticinoSipListener | None = d.get(DATA_DOORBELL_LISTENER)
+    if listener is not None:
+        listener.stop()
+
+    task: asyncio.Task | None = d.get(_LISTENER_TASK_KEY)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
