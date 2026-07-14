@@ -306,9 +306,6 @@ class BticinoSipClient:
             self._registered = False
 
     async def send_message(self, target_uri: str, body: str) -> None:
-        if not self._registered:
-            await self._register()
-
         builder = self._make_builder()
         call_id = _callid()
         request = builder.message(target_uri, body, call_id)
@@ -401,7 +398,7 @@ class BticinoSipClient:
     async def _send_recv(self, request: str) -> str:
         if not self._writer or not self._reader:
             raise BticinoSipError("Not connected")
-        _LOGGER.debug("SIP >>>\n%s", request)
+        _LOGGER.info("SIP >>>\n%s", request)
         self._writer.write(request.encode("utf-8"))
         await self._writer.drain()
         try:
@@ -409,5 +406,5 @@ class BticinoSipClient:
         except asyncio.TimeoutError as exc:
             raise BticinoSipError("Timeout waiting for SIP response") from exc
         response = raw.decode("utf-8", errors="replace")
-        _LOGGER.debug("SIP <<<\n%s", response)
+        _LOGGER.info("SIP <<< (len=%d) %r", len(raw), response[:300])
         return response
