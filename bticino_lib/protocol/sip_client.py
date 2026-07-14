@@ -159,6 +159,8 @@ class _SipMessageBuilder:
     ) -> None:
         self.local_uri = local_uri
         transport = "TLS" if use_tls else "TCP"
+        # Via sent-by must be "host:port" — no "sip:" prefix (RFC 3261 §20.42)
+        self._via_sent_by = f"{contact_host}:{contact_port}"
         self.contact = f"<sip:{contact_host}:{contact_port};transport={transport}>"
         self._transport = transport
         self._cseq = 0
@@ -178,7 +180,7 @@ class _SipMessageBuilder:
         cseq = self._next_cseq("REGISTER")
         lines = [
             f"REGISTER {server_uri} SIP/2.0",
-            f"Via: SIP/2.0/{self._transport} {self.contact[1:-1]};branch={via_branch}",
+            f"Via: SIP/2.0/{self._transport} {self._via_sent_by};branch={via_branch}",
             f"From: <{self.local_uri}>;tag={_rand_string(8)}",
             f"To: <{self.local_uri}>",
             f"Call-ID: {call_id}",
@@ -204,7 +206,7 @@ class _SipMessageBuilder:
         body_bytes = body.encode("utf-8")
         lines = [
             f"MESSAGE {target_uri} SIP/2.0",
-            f"Via: SIP/2.0/{self._transport} {self.contact[1:-1]};branch={via_branch}",
+            f"Via: SIP/2.0/{self._transport} {self._via_sent_by};branch={via_branch}",
             f"From: <{self.local_uri}>;tag={_rand_string(8)}",
             f"To: <{target_uri}>",
             f"Call-ID: {call_id}",
@@ -306,6 +308,9 @@ class BticinoSipClient:
             self._registered = False
 
     async def send_message(self, target_uri: str, body: str) -> None:
+        if not self._registered:
+            await self._register()
+
         builder = self._make_builder()
         call_id = _callid()
         request = builder.message(target_uri, body, call_id)
