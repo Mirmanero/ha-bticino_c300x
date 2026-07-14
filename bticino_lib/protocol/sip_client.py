@@ -403,13 +403,21 @@ class BticinoSipClient:
     async def _send_recv(self, request: str) -> str:
         if not self._writer or not self._reader:
             raise BticinoSipError("Not connected")
-        _LOGGER.info("SIP >>>\n%s", request)
+        _LOGGER.debug("SIP >>>\n%s", request)
         self._writer.write(request.encode("utf-8"))
         await self._writer.drain()
-        try:
-            raw = await asyncio.wait_for(self._reader.read(8192), timeout=self._timeout)
-        except asyncio.TimeoutError as exc:
-            raise BticinoSipError("Timeout waiting for SIP response") from exc
-        response = raw.decode("utf-8", errors="replace")
-        _LOGGER.info("SIP <<< (len=%d) %r", len(raw), response[:300])
-        return response
+        deadline = asyncio.get_event_loop().time() + self._timeout
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise BticinoSipError("Timeout waiting for SIP final response")
+            try:
+                raw = await asyncio.wait_for(self._reader.read(8192), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                raise BticinoSipError("Timeout waiting for SIP response") from exc
+            response = raw.decode("utf-8", errors="replace")
+            _LOGGER.debug("SIP <<< (len=%d)\n%s", len(raw), response)
+            if response.startswith("SIP/2.0 1"):
+                _LOGGER.info("SIP: provisional %s", response.split("\r\n")[0])
+                continue
+            return response
