@@ -251,7 +251,13 @@ class BticinoSipClient:
     async def connect(self) -> None:
         host = self._local_ip or self._creds.domain
         proto = "TLS" if self._use_tls else "TCP"
-        ssl_ctx = _build_ssl_context(self._tls) if self._use_tls else None
+        if self._use_tls:
+            # _build_ssl_context writes temp files + calls load_cert_chain — run off event loop
+            ssl_ctx = await asyncio.get_event_loop().run_in_executor(
+                None, _build_ssl_context, self._tls
+            )
+        else:
+            ssl_ctx = None
 
         _LOGGER.debug(
             "SIP connect: host=%s port=%s proto=%s sip_uri=%s domain=%s",
@@ -300,9 +306,8 @@ class BticinoSipClient:
             self._registered = False
 
     async def send_message(self, target_uri: str, body: str) -> None:
-        if not self._registered:
-            await self._register()
-
+        # The local gateway does not implement REGISTER — send MESSAGE directly.
+        # If the gateway asks for auth (401), retry with digest credentials.
         builder = self._make_builder()
         call_id = _callid()
         request = builder.message(target_uri, body, call_id)
