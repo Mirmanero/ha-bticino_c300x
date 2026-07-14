@@ -12,6 +12,7 @@ API_GW_LIST = "/eliot/plants/{plant_id}/gateway/"
 API_GW_INFO = "/eliot/plants/{plant_id}/gateway/{gw_id}"
 API_GW_CONF = "/eliot/plants/{plant_id}/gateway/{gw_id}/conf"
 API_SIP_USER = "/eliot/sip/users/plants/{plant_id}/gateway/{gw_id}"
+API_SIP_USER_CREATE = "/eliot/sip/user"
 API_SIGNCERT = "/eliot/users/cert/signcert"
 
 # HTTP headers

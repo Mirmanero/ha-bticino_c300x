@@ -24,6 +24,7 @@ from ..const import (
     API_PLANTS,
     API_SIGN_IN,
     API_SIP_USER,
+    API_SIP_USER_CREATE,
     API_SIGNCERT,
     APP_VERSION,
     CONF_ZIP_PASSWORD,
@@ -252,6 +253,32 @@ class BticinoApiClient:
         except aiohttp.ClientConnectionError as exc:
             raise BticinoConnectionError(f"Cannot connect to {self._base_url}") from exc
 
+
+    async def ensure_sip_user(
+        self, gateway_id: str, device_id: str, email: str
+    ) -> str:
+        """Register this HA installation as a SIP device if not already registered.
+
+        Mirrors the app flow in VctManageSipUsersController (L2/C1013F.java):
+        POST /eliot/sip/user with our device info before requesting TLS certs.
+        Returns the SipAccount string that identifies this device.
+        """
+        email_prefix = email.split("@")[0] if "@" in email else email
+        sip_account = f"{email_prefix}-{device_id}@{gateway_id}.bs.iotleg.com"
+        try:
+            await self._request(
+                "POST", API_SIP_USER_CREATE,
+                json={
+                    "SipAccount": sip_account,
+                    "DeviceName": "Home Assistant",
+                    "GatewayId": gateway_id,
+                    "IdDevice": device_id,
+                },
+            )
+            _LOGGER.info("SIP user registered: %s", sip_account)
+        except BticinoApiError as exc:
+            _LOGGER.debug("SIP user POST: %s (may already exist)", exc)
+        return sip_account
 
     async def get_sip_credentials(
         self, plant_id: str, gateway_id: str, device_id: str

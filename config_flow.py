@@ -88,13 +88,22 @@ async def _cloud_setup(username: str, password: str) -> dict:
         tls_ca = tls_cert = tls_key = ""
         try:
             device_id = _ha_device_id(gateway.gateway_id)
+
+            # Register this HA installation as a new SIP device (app flow: step 1)
+            sip_account_ha = await api.ensure_sip_user(
+                gateway.gateway_id, device_id, username
+            )
+
+            # Get SIP credentials (username/password) for our device (app flow: step 2)
             sip = await api.get_sip_credentials(plant.plant_id, gateway.gateway_id, device_id)
-            sip_username = sip.username
+            sip_username = sip_account_ha   # use the account we registered, not the phone's
             sip_password = sip.password
-            sip_domain = sip.domain
+            sip_domain = sip.domain or f"{gateway.gateway_id}.bs.iotleg.com"
             _LOGGER.info("SIP credentials acquired for gateway %s", gateway.gateway_id)
+
+            # Request TLS cert via CSR for our specific SIP account (app flow: step 3)
             try:
-                tls = await api.get_tls_certificates(sip_username)
+                tls = await api.get_tls_certificates(sip_account_ha)
                 tls_ca = tls.ca_cert_pem
                 tls_cert = tls.client_cert_pem
                 tls_key = tls.client_key_pem
