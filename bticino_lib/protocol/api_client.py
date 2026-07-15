@@ -421,26 +421,42 @@ def _extract_wifi_ip(readonly_txt: str) -> str:
 def _parse_devices(conf_xml: str, archive_xml: str) -> list[DeviceInfo]:
     """Parse conf.xml + archive.xml into a device list.
 
-    conf.xml  → one "Serratura" (VDE door, CID 10060, addr = p_default address)
-    archive.xml → user activations (ist type="1", non-camera objects)
+    conf.xml  → Serratura (CID 10060, p_default) + optional 3rd device based on mode:
+                  mode=0: CID 2009 "Luci scala" (StairLight), dev=comm/dev, addr=comm/address
+                  mode=1-3: CID 10060, dev="2", addr=P+mode
+                  mode=4-6: CID 10050, dev="2", addr=P+mode-3
+    archive.xml → user activations (non-camera objects)
     """
     P, p_dev = 0, "2"
+    N, n_dev, M = 0, "1", 0
     try:
         root = ET.fromstring(conf_xml)
         comm = root.find("./setup/vdes/communication")
         if comm is not None:
-            p_addr_el = comm.find("p_default/address")
-            p_dev_el = comm.find("p_default/dev")
-            if p_addr_el is not None and p_addr_el.text:
-                P = int(p_addr_el.text)
-            if p_dev_el is not None and p_dev_el.text:
-                p_dev = p_dev_el.text
+            def _txt(el, default=""):
+                return el.text if el is not None and el.text else default
+            P = int(_txt(comm.find("p_default/address"), str(P)))
+            p_dev = _txt(comm.find("p_default/dev"), p_dev)
+            N = int(_txt(comm.find("address"), str(N)))
+            n_dev = _txt(comm.find("dev"), n_dev)
+            M = int(_txt(comm.find("mode"), "0")) % 10
     except ET.ParseError:
-        _LOGGER.warning("conf.xml parse error, using defaults P=%s dev=%s", P, p_dev)
+        _LOGGER.warning("conf.xml parse error, using defaults")
+
+    _LOGGER.debug("conf.xml: P=%s p_dev=%s N=%s n_dev=%s M=%s", P, p_dev, N, n_dev, M)
 
     devices: list[DeviceInfo] = [
         DeviceInfo(cid=10060, name="Serratura", addr=str(P), dev=p_dev)
     ]
+
+    # 3rd device from conf.xml based on mode (mirrors K2/j.java switch(M))
+    if M == 0:
+        devices.append(DeviceInfo(cid=2009, name="Luci scala", addr=str(N), dev=n_dev))
+        _LOGGER.debug("conf.xml: added StairLight CID 2009 addr=%s dev=%s", N, n_dev)
+    elif 1 <= M <= 3:
+        devices.append(DeviceInfo(cid=10060, name=f"Citofono {M}", addr=str(P + M), dev="2"))
+    elif 4 <= M <= 6:
+        devices.append(DeviceInfo(cid=10050, name=f"Vivavoce {M}", addr=str(P + M - 3), dev="2"))
 
     try:
         root = ET.fromstring(archive_xml)
