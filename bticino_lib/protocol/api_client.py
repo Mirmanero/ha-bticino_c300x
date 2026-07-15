@@ -451,10 +451,13 @@ def _parse_devices(conf_xml: str, archive_xml: str) -> list[DeviceInfo]:
                 continue
             dev = obj.get("dev", "2")
             for ist in obj.findall("ist"):
-                if ist.get("type") != "1":
-                    continue
+                ist_type = ist.get("type", "")
                 addr = ist.get("where", "0")
                 name = ist.get("descr") or obj.get("descr") or f"Attivazione {cid}"
+                _LOGGER.debug(
+                    "archive.xml: cid=%s name=%r type=%r addr=%r dev=%r",
+                    cid, name, ist_type, addr, dev,
+                )
                 devices.append(DeviceInfo(cid=cid, name=name, addr=addr, dev=dev))
     except ET.ParseError:
         _LOGGER.warning("archive.xml parse error, skipping user activations")
