@@ -155,6 +155,7 @@ class BticinoApiClient:
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
                 zf.setpassword(CONF_ZIP_PASSWORD)
                 names = zf.namelist()
+                _LOGGER.debug("ZIP files: %s", names)
                 conf_xml = re.sub(
                     r"^.*?(<\?xml|<configuratore)", r"\1",
                     zf.read("conf.xml").decode("utf-8", errors="replace"),
@@ -168,6 +169,7 @@ class BticinoApiClient:
                     zf.read("read-only-par.txt").decode("utf-8", errors="replace")
                     if "read-only-par.txt" in names else ""
                 )
+                _LOGGER.debug("archive.xml raw:\n%s", archive_xml)
         except Exception as exc:
             raise BticinoApiError(f"Cannot read /conf ZIP: {exc}") from exc
 
