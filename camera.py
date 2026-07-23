@@ -148,15 +148,15 @@ class BticinoCamera(Camera):
         self._sip_client = client
         self._video_session = session
 
-        # SDP file for ffmpeg so it knows the codec / port to listen on
+        # SDP file for ffmpeg — must match PT used in the INVITE offer (99)
         sdp = (
             "v=0\r\n"
             f"o=- 0 0 IN IP4 {local_ip}\r\n"
             "s=bticino\r\n"
             f"c=IN IP4 {local_ip}\r\n"
             "t=0 0\r\n"
-            f"m=video {local_rtp_port} RTP/AVP 96\r\n"
-            "a=rtpmap:96 H264/90000\r\n"
+            f"m=video {local_rtp_port} RTP/AVP 99\r\n"
+            "a=rtpmap:99 H264/90000\r\n"
         )
         fd, sdp_path = tempfile.mkstemp(suffix=".sdp", prefix="bticino_")
         try:

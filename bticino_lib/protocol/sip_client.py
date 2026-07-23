@@ -73,19 +73,26 @@ def _parse_www_auth(header_value: str) -> dict[str, str]:
 
 
 def _build_sdp(local_ip: str, rtp_port: int) -> str:
-    """Minimal SDP offer for H.264 video receive-only (mirrors Linphone app behaviour)."""
+    """SDP offer mirroring Linphone defaults: H.264 PT=99, baseline profile, recvonly.
+
+    Audio section is included with a port (rtp_port+2) and marked recvonly so the
+    gateway accepts the offer — port-0/inactive is rejected by some embedded stacks.
+    """
     ts = int(time.time())
+    audio_port = rtp_port + 2
     return "\r\n".join([
         "v=0",
         f"o=- {ts} {ts} IN IP4 {local_ip}",
         "s=-",
         f"c=IN IP4 {local_ip}",
         "t=0 0",
-        "m=audio 0 RTP/AVP 0",
-        "a=inactive",
-        f"m=video {rtp_port} RTP/AVP 96",
-        "a=rtpmap:96 H264/90000",
-        "a=fmtp:96 packetization-mode=1",
+        f"m=audio {audio_port} RTP/AVP 0 8",
+        "a=rtpmap:0 PCMU/8000",
+        "a=rtpmap:8 PCMA/8000",
+        "a=recvonly",
+        f"m=video {rtp_port} RTP/AVP 99",
+        "a=rtpmap:99 H264/90000",
+        "a=fmtp:99 profile-level-id=42801f",
         "a=recvonly",
         "",
     ])
