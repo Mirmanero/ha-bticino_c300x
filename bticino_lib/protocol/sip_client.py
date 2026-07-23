@@ -89,11 +89,11 @@ def _build_sdp(local_ip: str, rtp_port: int) -> str:
         f"m=audio {audio_port} RTP/AVP 0 8",
         "a=rtpmap:0 PCMU/8000",
         "a=rtpmap:8 PCMA/8000",
-        "a=recvonly",
+        "a=sendrecv",
         f"m=video {rtp_port} RTP/AVP 99",
         "a=rtpmap:99 H264/90000",
         "a=fmtp:99 profile-level-id=42801f",
-        "a=recvonly",
+        "a=sendrecv",
         "",
     ])
 
@@ -439,6 +439,7 @@ class BticinoSipClient:
 
         local_ip = self._local_ip or self._creds.domain
         sdp = _build_sdp(local_ip, local_rtp_port)
+        _LOGGER.debug("SIP INVITE SDP offer:\n%s", sdp)
         builder = self._make_builder()
         call_id = _callid()
         from_tag = _rand_string(8)
