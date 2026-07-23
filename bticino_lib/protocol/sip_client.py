@@ -18,11 +18,23 @@ import re
 import ssl
 import string
 import tempfile
+import time
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 from ..exceptions import BticinoSipAuthError, BticinoSipError
 from ..models import SipCredentials, TlsCertificates
+
+
+@dataclass
+class VideoCallSession:
+    """State needed to track and terminate an active SIP video call."""
+    call_id: str
+    from_tag: str
+    to_tag: str
+    target_uri: str
+    local_rtp_port: int
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,6 +70,30 @@ def _parse_www_auth(header_value: str) -> dict[str, str]:
         if match.group(1) not in result:
             result[match.group(1)] = match.group(2)
     return result
+
+
+def _build_sdp(local_ip: str, rtp_port: int) -> str:
+    """Minimal SDP offer for H.264 video receive-only (mirrors Linphone app behaviour)."""
+    ts = int(time.time())
+    return "\r\n".join([
+        "v=0",
+        f"o=- {ts} {ts} IN IP4 {local_ip}",
+        "s=-",
+        f"c=IN IP4 {local_ip}",
+        "t=0 0",
+        "m=audio 0 RTP/AVP 0",
+        "a=inactive",
+        f"m=video {rtp_port} RTP/AVP 96",
+        "a=rtpmap:96 H264/90000",
+        "a=fmtp:96 packetization-mode=1",
+        "a=recvonly",
+        "",
+    ])
+
+
+def _extract_to_tag(response: str) -> str:
+    match = re.search(r"^To:.*?;tag=([^\s;,\r\n]+)", response, re.IGNORECASE | re.MULTILINE)
+    return match.group(1) if match else ""
 
 
 def _build_ssl_context(tls: Optional[TlsCertificates] = None) -> ssl.SSLContext:
@@ -164,6 +200,7 @@ class _SipMessageBuilder:
         self.contact = f"<sip:{contact_host}:{contact_port};transport={transport}>"
         self._transport = transport
         self._cseq = 0
+        self._invite_cseq_num = 0
 
     def _next_cseq(self, method: str) -> str:
         self._cseq += 1
@@ -192,6 +229,85 @@ class _SipMessageBuilder:
         if authorization:
             lines.append(f"Authorization: {authorization}")
         lines += ["Content-Length: 0", "", ""]
+        return _CRLF.join(lines)
+
+    def invite(
+        self,
+        target_uri: str,
+        call_id: str,
+        from_tag: str,
+        sdp_body: str,
+        authorization: Optional[str] = None,
+    ) -> str:
+        via_branch = f"z9hG4bK{_rand_string(8)}"
+        self._cseq += 1
+        self._invite_cseq_num = self._cseq
+        body_bytes = sdp_body.encode("utf-8")
+        lines = [
+            f"INVITE {target_uri} SIP/2.0",
+            f"Via: SIP/2.0/{self._transport} {self._via_sent_by};branch={via_branch}",
+            f"From: <{self.local_uri}>;tag={from_tag}",
+            f"To: <{target_uri}>",
+            f"Call-ID: {call_id}",
+            f"CSeq: {self._invite_cseq_num} INVITE",
+            f"Contact: {self.contact}",
+            "Max-Forwards: 70",
+            "Allow: INVITE, ACK, BYE, CANCEL, OPTIONS, MESSAGE",
+            "Content-Type: application/sdp",
+            f"Content-Length: {len(body_bytes)}",
+        ]
+        if authorization:
+            lines.append(f"Authorization: {authorization}")
+        lines += ["", sdp_body]
+        return _CRLF.join(lines)
+
+    def ack(
+        self,
+        target_uri: str,
+        call_id: str,
+        from_tag: str,
+        to_tag: str,
+    ) -> str:
+        via_branch = f"z9hG4bK{_rand_string(8)}"
+        to_field = f"<{target_uri}>;tag={to_tag}" if to_tag else f"<{target_uri}>"
+        lines = [
+            f"ACK {target_uri} SIP/2.0",
+            f"Via: SIP/2.0/{self._transport} {self._via_sent_by};branch={via_branch}",
+            f"From: <{self.local_uri}>;tag={from_tag}",
+            f"To: {to_field}",
+            f"Call-ID: {call_id}",
+            f"CSeq: {self._invite_cseq_num} ACK",
+            "Max-Forwards: 70",
+            "Content-Length: 0",
+            "",
+            "",
+        ]
+        return _CRLF.join(lines)
+
+    def bye(
+        self,
+        target_uri: str,
+        call_id: str,
+        from_tag: str,
+        to_tag: str,
+        authorization: Optional[str] = None,
+    ) -> str:
+        via_branch = f"z9hG4bK{_rand_string(8)}"
+        to_field = f"<{target_uri}>;tag={to_tag}" if to_tag else f"<{target_uri}>"
+        cseq = self._next_cseq("BYE")
+        lines = [
+            f"BYE {target_uri} SIP/2.0",
+            f"Via: SIP/2.0/{self._transport} {self._via_sent_by};branch={via_branch}",
+            f"From: <{self.local_uri}>;tag={from_tag}",
+            f"To: {to_field}",
+            f"Call-ID: {call_id}",
+            f"CSeq: {cseq}",
+            "Max-Forwards: 70",
+            "Content-Length: 0",
+        ]
+        if authorization:
+            lines.append(f"Authorization: {authorization}")
+        lines += ["", ""]
         return _CRLF.join(lines)
 
     def message(
@@ -307,6 +423,63 @@ class BticinoSipClient:
             self._reader = None
             self._registered = False
 
+    async def initiate_video_call(
+        self, target_uri: str, local_rtp_port: int
+    ) -> VideoCallSession:
+        """Send SIP INVITE with H.264 recvonly SDP; return session after 200 OK + ACK."""
+        if not self._registered:
+            await self._register()
+
+        local_ip = self._local_ip or self._creds.domain
+        sdp = _build_sdp(local_ip, local_rtp_port)
+        builder = self._make_builder()
+        call_id = _callid()
+        from_tag = _rand_string(8)
+
+        request = builder.invite(target_uri, call_id, from_tag, sdp)
+        response = await self._send_recv(request)
+
+        if response.startswith("SIP/2.0 2"):
+            to_tag = _extract_to_tag(response)
+            self._writer.write(builder.ack(target_uri, call_id, from_tag, to_tag).encode())
+            await self._writer.drain()
+            _LOGGER.info("SIP INVITE OK — video call started on RTP port %d", local_rtp_port)
+            return VideoCallSession(
+                call_id=call_id, from_tag=from_tag, to_tag=to_tag,
+                target_uri=target_uri, local_rtp_port=local_rtp_port,
+            )
+
+        if "401" in response[:20]:
+            _LOGGER.debug("SIP INVITE 401 — retrying with digest auth")
+            auth = self._build_digest(response, "INVITE", target_uri)
+            request = builder.invite(target_uri, call_id, from_tag, sdp, auth)
+            response = await self._send_recv(request)
+            if response.startswith("SIP/2.0 2"):
+                to_tag = _extract_to_tag(response)
+                self._writer.write(builder.ack(target_uri, call_id, from_tag, to_tag).encode())
+                await self._writer.drain()
+                _LOGGER.info("SIP INVITE OK (auth) — RTP port %d", local_rtp_port)
+                return VideoCallSession(
+                    call_id=call_id, from_tag=from_tag, to_tag=to_tag,
+                    target_uri=target_uri, local_rtp_port=local_rtp_port,
+                )
+            raise BticinoSipAuthError(f"SIP INVITE auth failed: {response[:200]}")
+
+        raise BticinoSipError(f"SIP INVITE unexpected response: {response[:200]}")
+
+    async def hang_up(self, session: VideoCallSession) -> None:
+        """Send SIP BYE to terminate an active video call."""
+        builder = self._make_builder()
+        request = builder.bye(
+            session.target_uri, session.call_id, session.from_tag, session.to_tag
+        )
+        _LOGGER.debug("SIP BYE → %s", session.target_uri)
+        try:
+            resp = await asyncio.wait_for(self._send_recv(request), timeout=5.0)
+            _LOGGER.info("SIP BYE: %s", resp.split(_CRLF)[0])
+        except Exception as exc:
+            _LOGGER.debug("SIP BYE error (ignored): %s", exc)
+
     async def send_message(self, target_uri: str, body: str) -> None:
         if not self._registered:
             await self._register()
@@ -407,6 +580,7 @@ class BticinoSipClient:
         self._writer.write(request.encode("utf-8"))
         await self._writer.drain()
         deadline = asyncio.get_event_loop().time() + self._timeout
+        buf = ""
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
@@ -415,9 +589,10 @@ class BticinoSipClient:
                 raw = await asyncio.wait_for(self._reader.read(8192), timeout=remaining)
             except asyncio.TimeoutError as exc:
                 raise BticinoSipError("Timeout waiting for SIP response") from exc
-            response = raw.decode("utf-8", errors="replace")
-            _LOGGER.debug("SIP <<< (len=%d)\n%s", len(raw), response)
-            if response.startswith("SIP/2.0 1"):
-                _LOGGER.info("SIP: provisional %s", response.split("\r\n")[0])
-                continue
-            return response
+            buf += raw.decode("utf-8", errors="replace")
+            _LOGGER.debug("SIP <<< (len=%d)\n%s", len(raw), buf)
+            # Multiple SIP messages may arrive in one chunk; find last non-provisional
+            for msg in reversed(re.split(r"(?=SIP/2\.0 )", buf)):
+                if msg.startswith("SIP/2.0 ") and not msg.startswith("SIP/2.0 1"):
+                    return msg
+            # Only provisional responses so far — keep reading

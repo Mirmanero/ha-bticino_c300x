@@ -18,13 +18,14 @@ from .exceptions import (
     BticinoSipError,
 )
 from .models import DeviceInfo, GatewayInfo, PlantInfo, SipCredentials, TlsCertificates
-from .protocol import BticinoApiClient, BticinoOwnClient, BticinoSipClient, BticinoSipListener
+from .protocol import BticinoApiClient, BticinoOwnClient, BticinoSipClient, BticinoSipListener, VideoCallSession
 
 __all__ = [
     "BticinoApiClient",
     "BticinoOwnClient",
     "BticinoSipClient",
     "BticinoSipListener",
+    "VideoCallSession",
     "DeviceInfo",
     "GatewayInfo",
     "PlantInfo",

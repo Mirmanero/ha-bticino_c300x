@@ -33,7 +33,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["button", "binary_sensor"]
+PLATFORMS = ["button", "binary_sensor", "camera"]
 
 _LISTENER_TASK_KEY = "doorbell_task"
 
