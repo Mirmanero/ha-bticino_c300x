@@ -31,7 +31,6 @@ from .bticino_lib.models import SipCredentials, TlsCertificates
 from .bticino_lib.const import SIP_TLS_PORT
 from .const import (
     CONF_DEVICES,
-    DATA_DOORBELL_LISTENER,
     DATA_OWN_PARAMS,
     DATA_SIP_PARAMS,
     DOMAIN,
@@ -122,23 +121,7 @@ class BticinoCamera(Camera):
                 await self._start_video()
         return self._latest_frame
 
-    async def async_added_to_hass(self) -> None:
-        listener = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry_id, {})
-            .get(DATA_DOORBELL_LISTENER)
-        )
-        if listener is not None:
-            listener.set_video_callbacks(self.on_video_start, self.on_video_end)
-
     async def async_will_remove_from_hass(self) -> None:
-        listener = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry_id, {})
-            .get(DATA_DOORBELL_LISTENER)
-        )
-        if listener is not None:
-            listener.set_video_callbacks(None, None)
         await self._stop_video()
 
     # ------------------------------------------------------------------
@@ -158,23 +141,6 @@ class BticinoCamera(Camera):
         self._inactivity_cancel = async_call_later(
             self.hass, _INACTIVITY_TIMEOUT, _on_inactive
         )
-
-    # ------------------------------------------------------------------
-    # Callbacks from SIP listener (incoming doorbell INVITE)
-    # ------------------------------------------------------------------
-
-    async def on_video_start(self, rtp_port: int, local_ip: str, video_pt: int) -> None:
-        """Called by the SIP listener when an incoming INVITE is accepted."""
-        _LOGGER.info("Camera: incoming video call accepted (RTP %d PT %d)", rtp_port, video_pt)
-        if self._inactivity_cancel:
-            self._inactivity_cancel()
-            self._inactivity_cancel = None
-        await self._start_ffmpeg(rtp_port, local_ip, video_pt)
-
-    def on_video_end(self) -> None:
-        """Called by the SIP listener when BYE is received."""
-        _LOGGER.info("Camera: incoming call ended")
-        self.hass.async_create_task(self._stop_ffmpeg())
 
     # ------------------------------------------------------------------
     # On-demand video (HA initiates INVITE)
