@@ -1,32 +1,30 @@
-"""Camera entity for Bticino C300X — on-demand H.264 video via SIP INVITE."""
+"""Camera entity for Bticino C300X — video from incoming SIP INVITE (doorbell ring).
+
+The C300X gateway sends a SIP INVITE when someone rings the doorbell.
+BticinoSipListener accepts it with 200 OK + SDP and calls on_video_start(),
+which starts ffmpeg to receive H.264 RTP and extract MJPEG frames.
+The camera entity serves the latest frame via async_camera_image().
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import random
 import tempfile
 from typing import Optional
 
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo as HaDeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_call_later
 
-from .bticino_lib import BticinoSipClient, VideoCallSession
-from .bticino_lib.models import SipCredentials, TlsCertificates
-from .bticino_lib.const import SIP_TLS_PORT
-from .const import DATA_OWN_PARAMS, DATA_SIP_PARAMS, DOMAIN
+from .const import DATA_DOORBELL_LISTENER, DATA_OWN_PARAMS, DATA_SIP_PARAMS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-_INACTIVITY_TIMEOUT = 30   # seconds without image request → stop stream
 _FFMPEG_FPS = 5
-_RTP_PORT_MIN = 9000
-_RTP_PORT_MAX = 9099
 
 
 async def async_setup_entry(
@@ -39,31 +37,32 @@ async def async_setup_entry(
     if not sip.get("sip_username") or not sip.get("sip_domain"):
         _LOGGER.warning("Bticino camera: SIP not configured — camera disabled")
         return
-    async_add_entities([BticinoCamera(data[DATA_OWN_PARAMS], sip, entry.entry_id)])
+    async_add_entities([BticinoCamera(data[DATA_OWN_PARAMS], entry.entry_id)])
 
 
 class BticinoCamera(Camera):
-    """On-demand video camera: opens a SIP INVITE when the feed is first accessed,
-    pipes H.264 RTP through ffmpeg, serves MJPEG frames, closes after inactivity."""
+    """Camera that shows live H.264 video during an incoming doorbell SIP call.
+
+    The SIP listener accepts the INVITE and calls our on_video_start() callback.
+    ffmpeg receives the RTP stream and we extract MJPEG frames for HA.
+    After the gateway sends BYE, on_video_end() stops ffmpeg; the last frame
+    remains visible until the next call.
+    """
 
     _attr_has_entity_name = True
     _attr_name = "Videocitofono"
     _attr_icon = "mdi:doorbell-video"
 
-    def __init__(self, own_params: dict, sip_params: dict, entry_id: str) -> None:
+    def __init__(self, own_params: dict, entry_id: str) -> None:
         super().__init__()
         self._own_params = own_params
-        self._sip_params = sip_params
+        self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_camera"
 
-        self._sip_client: Optional[BticinoSipClient] = None
-        self._video_session: Optional[VideoCallSession] = None
         self._ffmpeg_proc: Optional[asyncio.subprocess.Process] = None
         self._sdp_path: Optional[str] = None
         self._frame_task: Optional[asyncio.Task] = None
         self._latest_frame: Optional[bytes] = None
-        self._inactivity_cancel: Optional[asyncio.TimerHandle] = None
-        self._start_lock = asyncio.Lock()
 
     @property
     def device_info(self) -> HaDeviceInfo:
@@ -81,82 +80,47 @@ class BticinoCamera(Camera):
     async def async_camera_image(
         self, width: Optional[int] = None, height: Optional[int] = None
     ) -> Optional[bytes]:
-        self._reset_inactivity_timer()
-        async with self._start_lock:
-            if self._ffmpeg_proc is None or self._ffmpeg_proc.returncode is not None:
-                await self._start_video()
         return self._latest_frame
 
+    async def async_added_to_hass(self) -> None:
+        listener = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry_id, {})
+            .get(DATA_DOORBELL_LISTENER)
+        )
+        if listener is not None:
+            listener.set_video_callbacks(self.on_video_start, self.on_video_end)
+            _LOGGER.debug("Camera: video callbacks registered with SIP listener")
+        else:
+            _LOGGER.warning("Camera: SIP listener not available — no video")
+
     async def async_will_remove_from_hass(self) -> None:
-        await self._stop_video()
+        listener = (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry_id, {})
+            .get(DATA_DOORBELL_LISTENER)
+        )
+        if listener is not None:
+            listener.set_video_callbacks(None, None)
+        await self._stop_ffmpeg()
 
     # ------------------------------------------------------------------
-    # Inactivity timer
+    # Callbacks from SIP listener
     # ------------------------------------------------------------------
 
-    def _reset_inactivity_timer(self) -> None:
-        if self._inactivity_cancel is not None:
-            self._inactivity_cancel()
-            self._inactivity_cancel = None
+    async def on_video_start(self, rtp_port: int, local_ip: str, video_pt: int) -> None:
+        """Called by the SIP listener after accepting the INVITE with 200 OK.
+        Start ffmpeg before we return so the port is ready when RTP arrives."""
+        await self._stop_ffmpeg()
 
-        @callback
-        def _on_inactive(_now: object) -> None:
-            self._inactivity_cancel = None
-            self.hass.async_create_task(self._stop_video())
-
-        self._inactivity_cancel = async_call_later(
-            self.hass, _INACTIVITY_TIMEOUT, _on_inactive
-        )
-
-    # ------------------------------------------------------------------
-    # Video lifecycle
-    # ------------------------------------------------------------------
-
-    async def _start_video(self) -> None:
-        sip = self._sip_params
-        local_ip = sip.get("local_ip", "")
-        sip_domain = sip.get("sip_domain", "")
-        target = f"sip:c300x@{sip_domain}"
-        local_rtp_port = random.randint(_RTP_PORT_MIN, _RTP_PORT_MAX)
-
-        creds = SipCredentials(
-            username=sip["sip_username"],
-            password=sip["sip_password"],
-            domain=sip_domain,
-        )
-        tls = TlsCertificates(
-            ca_cert_pem=sip.get("tls_ca_cert", ""),
-            client_cert_pem=sip.get("tls_client_cert", ""),
-            client_key_pem=sip.get("tls_client_key", ""),
-        )
-
-        client = BticinoSipClient(
-            credentials=creds, tls=tls, local_ip=local_ip,
-            sip_port=SIP_TLS_PORT, use_tls=True,
-        )
-        try:
-            await client.connect()
-            session = await client.initiate_video_call(target, local_rtp_port)
-        except Exception as exc:
-            _LOGGER.error("Camera: SIP INVITE failed: %s", exc)
-            try:
-                await client.close()
-            except Exception:
-                pass
-            return
-
-        self._sip_client = client
-        self._video_session = session
-
-        # SDP file for ffmpeg — must match PT used in the INVITE offer (99)
         sdp = (
             "v=0\r\n"
             f"o=- 0 0 IN IP4 {local_ip}\r\n"
             "s=bticino\r\n"
             f"c=IN IP4 {local_ip}\r\n"
             "t=0 0\r\n"
-            f"m=video {local_rtp_port} RTP/AVP 99\r\n"
-            "a=rtpmap:99 H264/90000\r\n"
+            f"m=video {rtp_port} RTP/AVP {video_pt}\r\n"
+            f"a=rtpmap:{video_pt} H264/90000\r\n"
         )
         fd, sdp_path = tempfile.mkstemp(suffix=".sdp", prefix="bticino_")
         try:
@@ -181,23 +145,28 @@ class BticinoCamera(Camera):
             )
         except FileNotFoundError:
             _LOGGER.error("Camera: ffmpeg not found — install ffmpeg on the HA host")
-            await self._stop_video()
-            return
+            self._cleanup_sdp()
+            raise
         except Exception as exc:
             _LOGGER.error("Camera: ffmpeg start failed: %s", exc)
-            await self._stop_video()
-            return
+            self._cleanup_sdp()
+            raise
 
         self._frame_task = self.hass.async_create_background_task(
             self._read_frames(), name="bticino_camera_frames"
         )
-        _LOGGER.info("Camera: stream started (RTP port %d)", local_rtp_port)
+        _LOGGER.info("Camera: stream started (RTP port %d, PT %d)", rtp_port, video_pt)
 
-    async def _stop_video(self) -> None:
-        if self._inactivity_cancel is not None:
-            self._inactivity_cancel()
-            self._inactivity_cancel = None
+    def on_video_end(self) -> None:
+        """Called by the SIP listener when BYE is received."""
+        _LOGGER.info("Camera: call ended (BYE) — stopping stream")
+        self.hass.async_create_task(self._stop_ffmpeg())
 
+    # ------------------------------------------------------------------
+    # ffmpeg lifecycle
+    # ------------------------------------------------------------------
+
+    async def _stop_ffmpeg(self) -> None:
         if self._frame_task and not self._frame_task.done():
             self._frame_task.cancel()
             try:
@@ -217,29 +186,16 @@ class BticinoCamera(Camera):
                     pass
             self._ffmpeg_proc = None
 
+        self._cleanup_sdp()
+        _LOGGER.debug("Camera: ffmpeg stopped")
+
+    def _cleanup_sdp(self) -> None:
         if self._sdp_path:
             try:
                 os.unlink(self._sdp_path)
             except OSError:
                 pass
             self._sdp_path = None
-
-        if self._sip_client and self._video_session:
-            try:
-                await self._sip_client.hang_up(self._video_session)
-            except Exception as exc:
-                _LOGGER.debug("Camera: BYE error: %s", exc)
-
-        if self._sip_client:
-            try:
-                await self._sip_client.close()
-            except Exception:
-                pass
-            self._sip_client = None
-
-        self._video_session = None
-        self._latest_frame = None
-        _LOGGER.info("Camera: stream stopped")
 
     async def _read_frames(self) -> None:
         """Parse MJPEG stream from ffmpeg stdout (FF D8 … FF D9 boundaries)."""
