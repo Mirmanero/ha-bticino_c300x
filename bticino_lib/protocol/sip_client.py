@@ -72,28 +72,31 @@ def _parse_www_auth(header_value: str) -> dict[str, str]:
     return result
 
 
-def _build_sdp(local_ip: str, rtp_port: int) -> str:
-    """SDP offer mirroring Linphone defaults: H.264 PT=99, baseline profile, recvonly.
+def _build_sdp(local_ip: str, rtp_port: int, devaddr: str = "") -> str:
+    """SDP offer mirroring Linphone defaults: H.264 PT=99, audio recvonly, video recvonly.
 
-    Audio section is included with a port (rtp_port+2) and marked recvonly so the
-    gateway accepts the offer — port-0/inactive is rejected by some embedded stacks.
+    The DEVADDR session attribute is mandatory: the C300X gateway uses it to
+    identify which VDE device (camera) to stream from. Without it the gateway
+    responds 488 Not Acceptable Here.
+    DEVADDR = dev + addr of the VDE device (same as the OWN WHERE field).
     """
     ts = int(time.time())
     audio_port = rtp_port + 2
+    session_extras = [f"a=DEVADDR:{devaddr}"] if devaddr else []
     return "\r\n".join([
         "v=0",
         f"o=- {ts} {ts} IN IP4 {local_ip}",
         "s=-",
         f"c=IN IP4 {local_ip}",
         "t=0 0",
+        *session_extras,
         f"m=audio {audio_port} RTP/AVP 0 8",
         "a=rtpmap:0 PCMU/8000",
         "a=rtpmap:8 PCMA/8000",
-        "a=sendrecv",
+        "a=recvonly",
         f"m=video {rtp_port} RTP/AVP 99",
         "a=rtpmap:99 H264/90000",
-        "a=fmtp:99 profile-level-id=42801f",
-        "a=sendrecv",
+        "a=recvonly",
         "",
     ])
 
@@ -431,14 +434,14 @@ class BticinoSipClient:
             self._registered = False
 
     async def initiate_video_call(
-        self, target_uri: str, local_rtp_port: int
+        self, target_uri: str, local_rtp_port: int, devaddr: str = ""
     ) -> VideoCallSession:
         """Send SIP INVITE with H.264 recvonly SDP; return session after 200 OK + ACK."""
         if not self._registered:
             await self._register()
 
         local_ip = self._local_ip or self._creds.domain
-        sdp = _build_sdp(local_ip, local_rtp_port)
+        sdp = _build_sdp(local_ip, local_rtp_port, devaddr=devaddr)
         _LOGGER.debug("SIP INVITE SDP offer:\n%s", sdp)
         builder = self._make_builder()
         call_id = _callid()
