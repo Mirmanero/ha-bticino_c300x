@@ -151,7 +151,7 @@ class BticinoCamera(Camera):
         local_ip = sip.get("local_ip", "")
         sip_domain = sip.get("sip_domain", "")
         target = f"sip:c300x@{sip_domain}"
-        local_rtp_port = random.randint(_RTP_PORT_MIN, _RTP_PORT_MAX)
+        local_rtp_port = random.randint(_RTP_PORT_MIN, _RTP_PORT_MAX - 4) & ~1  # even, RTP+RTCP+audio
 
         _LOGGER.debug(
             "Camera: initiating SIP INVITE → %s DEVADDR=%r RTP port %d",
@@ -188,7 +188,9 @@ class BticinoCamera(Camera):
 
         self._sip_client = client
         self._video_session = session
-        await self._start_ffmpeg(local_rtp_port, local_ip, 99)
+        await self._start_ffmpeg(
+            local_rtp_port, session.media_ip or "0.0.0.0", session.video_pt
+        )
 
     async def _stop_video(self) -> None:
         if self._inactivity_cancel is not None:
@@ -225,6 +227,7 @@ class BticinoCamera(Camera):
             "t=0 0\r\n"
             f"m=video {rtp_port} RTP/AVP {video_pt}\r\n"
             f"a=rtpmap:{video_pt} H264/90000\r\n"
+            f"a=fmtp:{video_pt} profile-level-id=42801F\r\n"
         )
         fd, sdp_path = tempfile.mkstemp(suffix=".sdp", prefix="bticino_")
         try:

@@ -35,6 +35,8 @@ class VideoCallSession:
     to_tag: str
     target_uri: str
     local_rtp_port: int
+    video_pt: int = 97
+    media_ip: str = ""
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,13 +74,20 @@ def _parse_www_auth(header_value: str) -> dict[str, str]:
     return result
 
 
-def _build_sdp(local_ip: str, rtp_port: int, devaddr: str = "") -> str:
-    """SDP offer mirroring Linphone defaults: H.264 PT=99, audio recvonly, video recvonly.
+_VIDEO_PT = 97
+_AUDIO_PT = 97
 
-    The DEVADDR session attribute is mandatory: the C300X gateway uses it to
-    identify which VDE device (camera) to stream from. Without it the gateway
-    responds 488 Not Acceptable Here.
-    DEVADDR = dev + addr of the VDE device (same as the OWN WHERE field).
+
+def _build_sdp(local_ip: str, rtp_port: int, devaddr: str = "") -> str:
+    """SDP offer accepted by the C300X intercom process (bt_vct).
+
+    The C300X audio stack only supports Speex/8000: an offer containing only
+    PCMU/PCMA has no common audio codec and is rejected with 488 Not
+    Acceptable Here. Video is H.264 baseline (profile-level-id=42801F).
+    Layout mirrors the SDP used by the (working) scrypted-bticino plugin.
+
+    DEVADDR selects which external unit/camera streams (dev + addr of the
+    VDE device, e.g. "20" for the default door unit).
     """
     ts = int(time.time())
     audio_port = rtp_port + 2
@@ -90,15 +99,31 @@ def _build_sdp(local_ip: str, rtp_port: int, devaddr: str = "") -> str:
         f"c=IN IP4 {local_ip}",
         "t=0 0",
         *session_extras,
-        f"m=audio {audio_port} RTP/AVP 0 8",
-        "a=rtpmap:0 PCMU/8000",
-        "a=rtpmap:8 PCMA/8000",
+        f"m=audio {audio_port} RTP/AVP {_AUDIO_PT}",
+        f"a=rtpmap:{_AUDIO_PT} speex/8000",
+        f"a=fmtp:{_AUDIO_PT} vbr=on",
+        "a=sendrecv",
+        f"a=rtcp:{audio_port + 1}",
+        f"m=video {rtp_port} RTP/AVP {_VIDEO_PT}",
+        f"a=rtpmap:{_VIDEO_PT} H264/90000",
+        f"a=fmtp:{_VIDEO_PT} profile-level-id=42801F",
         "a=recvonly",
-        f"m=video {rtp_port} RTP/AVP 99",
-        "a=rtpmap:99 H264/90000",
-        "a=recvonly",
+        f"a=rtcp:{rtp_port + 1}",
         "",
     ])
+
+
+def _parse_answer_video_pt(response: str, default: int = _VIDEO_PT) -> int:
+    """Return the video payload type chosen by the gateway in its SDP answer."""
+    for line in response.splitlines():
+        if line.startswith("m=video"):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    return int(parts[3])
+                except ValueError:
+                    pass
+    return default
 
 
 def _extract_to_tag(response: str) -> str:
@@ -368,6 +393,7 @@ class BticinoSipClient:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._registered = False
+        self._media_ip: str = ""
 
     async def __aenter__(self) -> "BticinoSipClient":
         await self.connect()
@@ -420,7 +446,17 @@ class BticinoSipClient:
             except Exception as exc:
                 _LOGGER.debug("SIP TLS info not available: %s", exc)
 
-        _LOGGER.debug("SIP %s connection established to %s:%s", proto, host, self._port)
+        # Our own LAN IP as seen on this socket: this is where the gateway must
+        # send RTP (self._local_ip is the *gateway* address, not ours).
+        try:
+            self._media_ip = self._writer.get_extra_info("sockname")[0]
+        except Exception:
+            self._media_ip = ""
+
+        _LOGGER.debug(
+            "SIP %s connection established to %s:%s (local media IP %s)",
+            proto, host, self._port, self._media_ip or "?",
+        )
 
     async def close(self) -> None:
         if self._writer:
@@ -440,8 +476,8 @@ class BticinoSipClient:
         if not self._registered:
             await self._register()
 
-        local_ip = self._local_ip or self._creds.domain
-        sdp = _build_sdp(local_ip, local_rtp_port, devaddr=devaddr)
+        media_ip = self._media_ip or self._local_ip or self._creds.domain
+        sdp = _build_sdp(media_ip, local_rtp_port, devaddr=devaddr)
         _LOGGER.debug("SIP INVITE SDP offer:\n%s", sdp)
         builder = self._make_builder()
         call_id = _callid()
@@ -458,6 +494,8 @@ class BticinoSipClient:
             return VideoCallSession(
                 call_id=call_id, from_tag=from_tag, to_tag=to_tag,
                 target_uri=target_uri, local_rtp_port=local_rtp_port,
+                video_pt=_parse_answer_video_pt(response),
+                media_ip=media_ip,
             )
 
         if "401" in response[:20]:
@@ -473,10 +511,17 @@ class BticinoSipClient:
                 return VideoCallSession(
                     call_id=call_id, from_tag=from_tag, to_tag=to_tag,
                     target_uri=target_uri, local_rtp_port=local_rtp_port,
+                    video_pt=_parse_answer_video_pt(response),
+                media_ip=media_ip,
                 )
             raise BticinoSipAuthError(f"SIP INVITE auth failed: {response[:200]}")
 
-        raise BticinoSipError(f"SIP INVITE unexpected response: {response[:200]}")
+        _LOGGER.error(
+            "SIP INVITE rejected. Offer SDP:\n%s\nFull response:\n%s", sdp, response
+        )
+        raise BticinoSipError(
+            f"SIP INVITE unexpected response: {response.split(_CRLF)[0]}"
+        )
 
     async def hang_up(self, session: VideoCallSession) -> None:
         """Send SIP BYE to terminate an active video call."""
