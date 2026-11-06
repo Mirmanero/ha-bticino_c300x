@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
 import random
 import re
@@ -433,6 +434,25 @@ class BticinoSipClient:
             self._reader = None
             self._registered = False
 
+    @property
+    def media_ip(self) -> str:
+        """IPv4 receiver address selected by the route to the SIP gateway.
+
+        ``_local_ip`` is the remote gateway, despite its historical name.
+        Read the connected socket instead so multihomed HA hosts advertise
+        the interface that can actually reach that gateway.
+        """
+        if self._writer is None:
+            raise BticinoSipError("Cannot determine media address before connecting")
+        sockname = self._writer.get_extra_info("sockname")
+        try:
+            address = ipaddress.IPv4Address(sockname[0])
+        except (TypeError, IndexError, ValueError) as exc:
+            raise BticinoSipError("Video requires a connected IPv4 media address") from exc
+        if address.is_unspecified:
+            raise BticinoSipError("Cannot advertise an unspecified media address")
+        return str(address)
+
     async def initiate_video_call(
         self, target_uri: str, local_rtp_port: int, devaddr: str = ""
     ) -> VideoCallSession:
@@ -440,7 +460,7 @@ class BticinoSipClient:
         if not self._registered:
             await self._register()
 
-        local_ip = self._local_ip or self._creds.domain
+        local_ip = self.media_ip
         sdp = _build_sdp(local_ip, local_rtp_port, devaddr=devaddr)
         _LOGGER.debug("SIP INVITE SDP offer:\n%s", sdp)
         builder = self._make_builder()
