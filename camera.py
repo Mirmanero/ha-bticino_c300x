@@ -178,6 +178,7 @@ class BticinoCamera(Camera):
             session = await client.initiate_video_call(
                 target, local_rtp_port, devaddr=self._devaddr
             )
+            media_ip = client.media_ip
         except Exception as exc:
             _LOGGER.error("Camera: SIP INVITE failed: %s", exc)
             try:
@@ -188,7 +189,7 @@ class BticinoCamera(Camera):
 
         self._sip_client = client
         self._video_session = session
-        await self._start_ffmpeg(local_rtp_port, local_ip, 99)
+        await self._start_ffmpeg(local_rtp_port, media_ip, 99)
 
     async def _stop_video(self) -> None:
         if self._inactivity_cancel is not None:
