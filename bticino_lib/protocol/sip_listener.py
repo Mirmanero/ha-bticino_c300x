@@ -97,6 +97,19 @@ def _build_200ok_sdp(request: str, tag: str, sdp_body: str) -> str:
     return _CRLF.join(parts)
 
 
+def _parse_audio_pt(msg: str) -> int:
+    """Extract the first audio payload type from an incoming INVITE SDP."""
+    for line in msg.splitlines():
+        if line.startswith("m=audio"):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    return int(parts[3])
+                except ValueError:
+                    pass
+    return 97
+
+
 def _parse_video_pt(msg: str) -> int:
     """Extract the first video payload type from an incoming INVITE SDP."""
     in_video = False
@@ -111,11 +124,17 @@ def _parse_video_pt(msg: str) -> int:
             in_video = True
         elif line.startswith("m=") and in_video:
             break
-    return 99  # Linphone default
+    return 97  # C300X default
 
 
-def _build_video_answer_sdp(local_ip: str, video_port: int, video_pt: int) -> str:
-    """SDP answer accepting video receive-only with the gateway's offered PT."""
+def _build_video_answer_sdp(
+    local_ip: str, video_port: int, video_pt: int, audio_pt: int = 97
+) -> str:
+    """SDP answer accepting video receive-only with the gateway's offered PTs.
+
+    local_ip must be HA's own LAN IP (where RTP is sent), not the gateway's.
+    Audio is Speex/8000, the only codec the C300X supports.
+    """
     ts = int(time.time())
     audio_port = video_port + 2
     return "\r\n".join([
@@ -124,12 +143,13 @@ def _build_video_answer_sdp(local_ip: str, video_port: int, video_pt: int) -> st
         "s=-",
         f"c=IN IP4 {local_ip}",
         "t=0 0",
-        f"m=audio {audio_port} RTP/AVP 0 8",
-        "a=rtpmap:0 PCMU/8000",
-        "a=rtpmap:8 PCMA/8000",
+        f"m=audio {audio_port} RTP/AVP {audio_pt}",
+        f"a=rtpmap:{audio_pt} speex/8000",
+        f"a=fmtp:{audio_pt} vbr=on",
         "a=recvonly",
         f"m=video {video_port} RTP/AVP {video_pt}",
         f"a=rtpmap:{video_pt} H264/90000",
+        f"a=fmtp:{video_pt} profile-level-id=42801F",
         "a=recvonly",
         "",
     ])
@@ -282,6 +302,13 @@ class BticinoSipListener:
         builder = self._make_builder()
         await self._do_register(reader, writer, builder)
 
+        # HA's own LAN IP on this socket — where the gateway must send RTP.
+        # (self._local_ip is the gateway address.)
+        try:
+            media_ip = writer.get_extra_info("sockname")[0]
+        except Exception:
+            media_ip = self._local_ip
+
         reregister_at = (
             asyncio.get_event_loop().time() + _REGISTER_EXPIRES - _REREGISTER_MARGIN
         )
@@ -313,10 +340,13 @@ class BticinoSipListener:
                 tag = _rand_string(8)
                 if self._on_video_start is not None:
                     video_pt = _parse_video_pt(msg)
-                    rtp_port = random.randint(9000, 9099)
+                    audio_pt = _parse_audio_pt(msg)
+                    rtp_port = random.randint(9000, 9095) & ~1
                     try:
-                        await self._on_video_start(rtp_port, self._local_ip, video_pt)
-                        sdp = _build_video_answer_sdp(self._local_ip, rtp_port, video_pt)
+                        await self._on_video_start(rtp_port, media_ip, video_pt)
+                        sdp = _build_video_answer_sdp(
+                            media_ip, rtp_port, video_pt, audio_pt
+                        )
                         resp = _build_200ok_sdp(msg, tag, sdp)
                         _LOGGER.info(
                             "SIP listener: accepting video call "

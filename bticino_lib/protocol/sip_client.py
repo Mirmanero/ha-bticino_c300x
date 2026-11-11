@@ -11,6 +11,7 @@ Sequence:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import random
@@ -20,7 +21,7 @@ import string
 import tempfile
 import time
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ..exceptions import BticinoSipAuthError, BticinoSipError
@@ -35,6 +36,14 @@ class VideoCallSession:
     to_tag: str
     target_uri: str
     local_rtp_port: int
+    video_pt: int = 96
+    media_ip: str = ""
+    # SDP "a=crypto:" line from the gateway's answer: key that decrypts its SRTP video
+    video_crypto: str = ""
+    # In-dialog routing (RFC 3261 §12.1.2): remote Contact + reversed Record-Route
+    remote_target: str = ""
+    route_set: list[str] = field(default_factory=list)
+    invite_cseq: int = 1
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,13 +81,27 @@ def _parse_www_auth(header_value: str) -> dict[str, str]:
     return result
 
 
-def _build_sdp(local_ip: str, rtp_port: int, devaddr: str = "") -> str:
-    """SDP offer mirroring Linphone defaults: H.264 PT=99, audio recvonly, video recvonly.
+_VIDEO_PT = 96
+_AUDIO_PT = 97
+_SRTP_SUITE = "AES_CM_128_HMAC_SHA1_80"
 
-    The DEVADDR session attribute is mandatory: the C300X gateway uses it to
-    identify which VDE device (camera) to stream from. Without it the gateway
-    responds 488 Not Acceptable Here.
-    DEVADDR = dev + addr of the VDE device (same as the OWN WHERE field).
+
+def _srtp_crypto_line() -> str:
+    """Random SDES key (16-byte master key + 14-byte salt), RFC 4568."""
+    key = base64.b64encode(os.urandom(30)).decode()
+    return f"a=crypto:1 {_SRTP_SUITE} inline:{key}"
+
+
+def _build_sdp(local_ip: str, rtp_port: int, devaddr: str = "") -> str:
+    """SDP offer accepted by the C300X intercom (Linphone/belle-sip based).
+
+    Verified against a real C300X: any plain RTP/AVP offer is rejected with
+    488 Not Acceptable Here — media encryption is mandatory, so both streams
+    are offered as RTP/SAVP with an SDES a=crypto key. Audio is Speex/8000,
+    video H.264 baseline (profile-level-id=42801F).
+
+    DEVADDR selects which external unit/camera streams (dev + addr of the
+    VDE device, e.g. "20" for the default door unit).
     """
     ts = int(time.time())
     audio_port = rtp_port + 2
@@ -90,15 +113,63 @@ def _build_sdp(local_ip: str, rtp_port: int, devaddr: str = "") -> str:
         f"c=IN IP4 {local_ip}",
         "t=0 0",
         *session_extras,
-        f"m=audio {audio_port} RTP/AVP 0 8",
-        "a=rtpmap:0 PCMU/8000",
-        "a=rtpmap:8 PCMA/8000",
+        f"m=audio {audio_port} RTP/SAVP {_AUDIO_PT}",
+        f"a=rtpmap:{_AUDIO_PT} speex/8000",
+        f"a=fmtp:{_AUDIO_PT} vbr=on",
+        _srtp_crypto_line(),
         "a=recvonly",
-        f"m=video {rtp_port} RTP/AVP 99",
-        "a=rtpmap:99 H264/90000",
+        f"m=video {rtp_port} RTP/SAVP {_VIDEO_PT}",
+        f"a=rtpmap:{_VIDEO_PT} H264/90000",
+        f"a=fmtp:{_VIDEO_PT} profile-level-id=42801F",
+        _srtp_crypto_line(),
         "a=recvonly",
         "",
     ])
+
+
+def _video_section(response: str) -> list[str]:
+    lines: list[str] = []
+    in_video = False
+    for line in response.splitlines():
+        if line.startswith("m="):
+            in_video = line.startswith("m=video")
+        if in_video:
+            lines.append(line.strip())
+    return lines
+
+
+def _parse_answer_video_pt(response: str, default: int = _VIDEO_PT) -> int:
+    """Return the video payload type chosen by the gateway in its SDP answer."""
+    section = _video_section(response)
+    if section:
+        parts = section[0].split()
+        if len(parts) >= 4:
+            try:
+                return int(parts[3])
+            except ValueError:
+                pass
+    return default
+
+
+def _parse_answer_video_crypto(response: str) -> str:
+    """Return the gateway's a=crypto line for the video stream ("" if none)."""
+    for line in _video_section(response):
+        if line.startswith("a=crypto:"):
+            return line
+    return ""
+
+
+def _parse_remote_target(response: str) -> str:
+    match = re.search(r"^(?:Contact|m):\s*[^<\r\n]*<([^>]+)>", response, re.IGNORECASE | re.MULTILINE)
+    return match.group(1) if match else ""
+
+
+def _parse_route_set(response: str) -> list[str]:
+    """Record-Route entries reversed, as required for the UAC side."""
+    routes: list[str] = []
+    for match in re.finditer(r"^Record-Route:\s*(.+)$", response, re.IGNORECASE | re.MULTILINE):
+        routes += re.findall(r"<[^>]+>", match.group(1))
+    return list(reversed(routes))
 
 
 def _extract_to_tag(response: str) -> str:
@@ -195,6 +266,14 @@ def _build_ssl_context(tls: Optional[TlsCertificates] = None) -> ssl.SSLContext:
     return ctx
 
 
+def _body_complete(msg: str) -> bool:
+    head, sep, body = msg.partition("\r\n\r\n")
+    if not sep:
+        return False
+    match = re.search(r"^(?:Content-Length|l):\s*(\d+)", head, re.IGNORECASE | re.MULTILINE)
+    return len(body.encode("utf-8")) >= (int(match.group(1)) if match else 0)
+
+
 class _SipMessageBuilder:
     def __init__(
         self,
@@ -277,16 +356,21 @@ class _SipMessageBuilder:
         call_id: str,
         from_tag: str,
         to_tag: str,
+        request_uri: str = "",
+        routes: Optional[list[str]] = None,
+        cseq_num: Optional[int] = None,
     ) -> str:
         via_branch = f"z9hG4bK{_rand_string(8)}"
         to_field = f"<{target_uri}>;tag={to_tag}" if to_tag else f"<{target_uri}>"
+        num = cseq_num if cseq_num is not None else self._invite_cseq_num
         lines = [
-            f"ACK {target_uri} SIP/2.0",
+            f"ACK {request_uri or target_uri} SIP/2.0",
             f"Via: SIP/2.0/{self._transport} {self._via_sent_by};branch={via_branch}",
+            *(f"Route: {r}" for r in (routes or [])),
             f"From: <{self.local_uri}>;tag={from_tag}",
             f"To: {to_field}",
             f"Call-ID: {call_id}",
-            f"CSeq: {self._invite_cseq_num} ACK",
+            f"CSeq: {num} ACK",
             "Max-Forwards: 70",
             "Content-Length: 0",
             "",
@@ -301,13 +385,17 @@ class _SipMessageBuilder:
         from_tag: str,
         to_tag: str,
         authorization: Optional[str] = None,
+        request_uri: str = "",
+        routes: Optional[list[str]] = None,
+        cseq_num: Optional[int] = None,
     ) -> str:
         via_branch = f"z9hG4bK{_rand_string(8)}"
         to_field = f"<{target_uri}>;tag={to_tag}" if to_tag else f"<{target_uri}>"
-        cseq = self._next_cseq("BYE")
+        cseq = f"{cseq_num} BYE" if cseq_num is not None else self._next_cseq("BYE")
         lines = [
-            f"BYE {target_uri} SIP/2.0",
+            f"BYE {request_uri or target_uri} SIP/2.0",
             f"Via: SIP/2.0/{self._transport} {self._via_sent_by};branch={via_branch}",
+            *(f"Route: {r}" for r in (routes or [])),
             f"From: <{self.local_uri}>;tag={from_tag}",
             f"To: {to_field}",
             f"Call-ID: {call_id}",
@@ -368,6 +456,7 @@ class BticinoSipClient:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._registered = False
+        self._media_ip: str = ""
 
     async def __aenter__(self) -> "BticinoSipClient":
         await self.connect()
@@ -420,7 +509,17 @@ class BticinoSipClient:
             except Exception as exc:
                 _LOGGER.debug("SIP TLS info not available: %s", exc)
 
-        _LOGGER.debug("SIP %s connection established to %s:%s", proto, host, self._port)
+        # Our own LAN IP as seen on this socket: this is where the gateway must
+        # send RTP (self._local_ip is the *gateway* address, not ours).
+        try:
+            self._media_ip = self._writer.get_extra_info("sockname")[0]
+        except Exception:
+            self._media_ip = ""
+
+        _LOGGER.debug(
+            "SIP %s connection established to %s:%s (local media IP %s)",
+            proto, host, self._port, self._media_ip or "?",
+        )
 
     async def close(self) -> None:
         if self._writer:
@@ -440,8 +539,8 @@ class BticinoSipClient:
         if not self._registered:
             await self._register()
 
-        local_ip = self._local_ip or self._creds.domain
-        sdp = _build_sdp(local_ip, local_rtp_port, devaddr=devaddr)
+        media_ip = self._media_ip or self._local_ip or self._creds.domain
+        sdp = _build_sdp(media_ip, local_rtp_port, devaddr=devaddr)
         _LOGGER.debug("SIP INVITE SDP offer:\n%s", sdp)
         builder = self._make_builder()
         call_id = _callid()
@@ -450,39 +549,55 @@ class BticinoSipClient:
         request = builder.invite(target_uri, call_id, from_tag, sdp)
         response = await self._send_recv(request)
 
-        if response.startswith("SIP/2.0 2"):
-            to_tag = _extract_to_tag(response)
-            self._writer.write(builder.ack(target_uri, call_id, from_tag, to_tag).encode())
-            await self._writer.drain()
-            _LOGGER.info("SIP INVITE OK — video call started on RTP port %d", local_rtp_port)
-            return VideoCallSession(
-                call_id=call_id, from_tag=from_tag, to_tag=to_tag,
-                target_uri=target_uri, local_rtp_port=local_rtp_port,
-            )
-
         if "401" in response[:20]:
             _LOGGER.debug("SIP INVITE 401 — retrying with digest auth")
             auth = self._build_digest(response, "INVITE", target_uri)
             request = builder.invite(target_uri, call_id, from_tag, sdp, auth)
             response = await self._send_recv(request)
-            if response.startswith("SIP/2.0 2"):
-                to_tag = _extract_to_tag(response)
-                self._writer.write(builder.ack(target_uri, call_id, from_tag, to_tag).encode())
-                await self._writer.drain()
-                _LOGGER.info("SIP INVITE OK (auth) — RTP port %d", local_rtp_port)
-                return VideoCallSession(
-                    call_id=call_id, from_tag=from_tag, to_tag=to_tag,
-                    target_uri=target_uri, local_rtp_port=local_rtp_port,
-                )
-            raise BticinoSipAuthError(f"SIP INVITE auth failed: {response[:200]}")
+            if not response.startswith("SIP/2.0 2"):
+                raise BticinoSipAuthError(f"SIP INVITE auth failed: {response[:200]}")
 
-        raise BticinoSipError(f"SIP INVITE unexpected response: {response[:200]}")
+        if response.startswith("SIP/2.0 2"):
+            _LOGGER.debug("SIP INVITE answer:\n%s", response)
+            session = VideoCallSession(
+                call_id=call_id,
+                from_tag=from_tag,
+                to_tag=_extract_to_tag(response),
+                target_uri=target_uri,
+                local_rtp_port=local_rtp_port,
+                video_pt=_parse_answer_video_pt(response),
+                media_ip=media_ip,
+                video_crypto=_parse_answer_video_crypto(response),
+                remote_target=_parse_remote_target(response),
+                route_set=_parse_route_set(response),
+                invite_cseq=builder._invite_cseq_num,
+            )
+            self._writer.write(builder.ack(
+                target_uri, call_id, from_tag, session.to_tag,
+                request_uri=session.remote_target, routes=session.route_set,
+                cseq_num=session.invite_cseq,
+            ).encode())
+            await self._writer.drain()
+            _LOGGER.info(
+                "SIP INVITE OK — video PT %d, SRTP=%s, RTP port %d",
+                session.video_pt, bool(session.video_crypto), local_rtp_port,
+            )
+            return session
+
+        _LOGGER.error(
+            "SIP INVITE rejected. Offer SDP:\n%s\nFull response:\n%s", sdp, response
+        )
+        raise BticinoSipError(
+            f"SIP INVITE unexpected response: {response.split(_CRLF)[0]}"
+        )
 
     async def hang_up(self, session: VideoCallSession) -> None:
         """Send SIP BYE to terminate an active video call."""
         builder = self._make_builder()
         request = builder.bye(
-            session.target_uri, session.call_id, session.from_tag, session.to_tag
+            session.target_uri, session.call_id, session.from_tag, session.to_tag,
+            request_uri=session.remote_target, routes=session.route_set,
+            cseq_num=session.invite_cseq + 1,
         )
         _LOGGER.debug("SIP BYE → %s", session.target_uri)
         try:
@@ -605,5 +720,7 @@ class BticinoSipClient:
             # Multiple SIP messages may arrive in one chunk; find last non-provisional
             for msg in reversed(re.split(r"(?=SIP/2\.0 )", buf)):
                 if msg.startswith("SIP/2.0 ") and not msg.startswith("SIP/2.0 1"):
-                    return msg
+                    if _body_complete(msg):
+                        return msg
+                    break  # final response found but body still arriving
             # Only provisional responses so far — keep reading

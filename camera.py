@@ -151,7 +151,7 @@ class BticinoCamera(Camera):
         local_ip = sip.get("local_ip", "")
         sip_domain = sip.get("sip_domain", "")
         target = f"sip:c300x@{sip_domain}"
-        local_rtp_port = random.randint(_RTP_PORT_MIN, _RTP_PORT_MAX)
+        local_rtp_port = random.randint(_RTP_PORT_MIN, _RTP_PORT_MAX - 4) & ~1  # even, RTP+RTCP+audio
 
         _LOGGER.debug(
             "Camera: initiating SIP INVITE → %s DEVADDR=%r RTP port %d",
@@ -188,7 +188,10 @@ class BticinoCamera(Camera):
 
         self._sip_client = client
         self._video_session = session
-        await self._start_ffmpeg(local_rtp_port, local_ip, 99)
+        await self._start_ffmpeg(
+            local_rtp_port, session.media_ip or "0.0.0.0", session.video_pt,
+            session.video_crypto,
+        )
 
     async def _stop_video(self) -> None:
         if self._inactivity_cancel is not None:
@@ -214,17 +217,23 @@ class BticinoCamera(Camera):
     # ffmpeg
     # ------------------------------------------------------------------
 
-    async def _start_ffmpeg(self, rtp_port: int, local_ip: str, video_pt: int) -> None:
+    async def _start_ffmpeg(
+        self, rtp_port: int, local_ip: str, video_pt: int, crypto: str = ""
+    ) -> None:
         await self._stop_ffmpeg()
 
+        # The C300X sends SRTP: ffmpeg decrypts it from the SDP a=crypto line
+        proto = "RTP/SAVP" if crypto else "RTP/AVP"
         sdp = (
             "v=0\r\n"
             f"o=- 0 0 IN IP4 {local_ip}\r\n"
             "s=bticino\r\n"
             f"c=IN IP4 {local_ip}\r\n"
             "t=0 0\r\n"
-            f"m=video {rtp_port} RTP/AVP {video_pt}\r\n"
+            f"m=video {rtp_port} {proto} {video_pt}\r\n"
             f"a=rtpmap:{video_pt} H264/90000\r\n"
+            f"a=fmtp:{video_pt} profile-level-id=42801F\r\n"
+            + (f"{crypto}\r\n" if crypto else "")
         )
         fd, sdp_path = tempfile.mkstemp(suffix=".sdp", prefix="bticino_")
         try:
@@ -237,7 +246,7 @@ class BticinoCamera(Camera):
             self._ffmpeg_proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
                 "-loglevel", "error",
-                "-protocol_whitelist", "file,rtp,udp",
+                "-protocol_whitelist", "file,rtp,srtp,udp",
                 "-i", sdp_path,
                 "-vf", f"fps={_FFMPEG_FPS}",
                 "-q:v", "5",
@@ -314,6 +323,17 @@ class BticinoCamera(Camera):
                     self._latest_frame = buf[start : end + 2]
                     buf = buf[end + 2 :]
         except asyncio.CancelledError:
-            pass
+            return
         except Exception as exc:
             _LOGGER.debug("Camera: frame reader error: %s", exc)
+        # stdout closed → ffmpeg exited: surface its error output
+        if proc.stderr is not None:
+            try:
+                err = (await asyncio.wait_for(proc.stderr.read(), 2.0)).decode(errors="replace")
+            except Exception:
+                err = ""
+            _LOGGER.warning(
+                "Camera: ffmpeg exited (frames received: %s)%s",
+                self._latest_frame is not None,
+                f":\n{err.strip()}" if err.strip() else "",
+            )
