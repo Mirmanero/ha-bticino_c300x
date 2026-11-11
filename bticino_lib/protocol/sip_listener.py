@@ -124,7 +124,7 @@ def _parse_video_pt(msg: str) -> int:
             in_video = True
         elif line.startswith("m=") and in_video:
             break
-    return 97  # C300X default
+    return 96  # same default as sip_client._VIDEO_PT (97 is the audio PT)
 
 
 def _build_video_answer_sdp(
